@@ -62,7 +62,7 @@ export function createProfessorAgent(): ProfessorAgent {
     speaker: VOICE_CONFIG.speaker,
     sessionConfig: VOICE_CONFIG.sessionConfig,
     // Uncomment to enable verbose Gemini Live API logs:
-    debug: true,
+    //debug: true,
   });
 
   patchSetupForAudioResponses(voice, VOICE_CONFIG.speaker);

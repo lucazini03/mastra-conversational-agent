@@ -159,7 +159,7 @@ export class SessionHandler {
       // Gemini 3.1 rejects `client_content` (used by voice.speak()) mid-session.
       // The correct approach is `realtimeInput` with a `text` field, sent raw
       // over the underlying WebSocket that Mastra exposes via connectionManager.
-      this.geminiSpeakFirst(voice, 'Ciao! Sono pronto ad aiutarti.');
+      this.geminiSpeakFirst(voice, 'Sei l\'assistente di MemorAIz. Presentati, poi chiedi all\'utente come puoi aiutarlo oggi.');
 
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
