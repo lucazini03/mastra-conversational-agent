@@ -1,0 +1,384 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Il Professore — Italian Tutor STS</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg-0: #f3efe3;
+        --bg-1: #f8f4ea;
+        --bg-2: #f2e4c8;
+        --ink: #1c1b1a;
+        --muted: #5e5447;
+        --accent: #9f2d23;
+        --accent-2: #007a53;
+        --card: rgba(255, 255, 255, 0.85);
+        --border: rgba(28, 27, 26, 0.14);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: Georgia, 'Times New Roman', serif;
+        color: var(--ink);
+        background:
+          radial-gradient(1200px 600px at -10% -10%, var(--bg-2), transparent 60%),
+          radial-gradient(800px 500px at 100% 10%, #f7dcc8, transparent 60%),
+          linear-gradient(160deg, var(--bg-0), var(--bg-1));
+      }
+
+      .shell {
+        max-width: 920px;
+        margin: 0 auto;
+        padding: 28px 16px 40px;
+      }
+
+      .title {
+        margin: 0;
+        letter-spacing: 0.02em;
+        font-size: clamp(1.9rem, 4vw, 2.8rem);
+      }
+
+      .subtitle {
+        margin: 6px 0 22px;
+        color: var(--muted);
+        font-size: 1rem;
+      }
+
+      .panel {
+        border: 1px solid var(--border);
+        border-radius: 18px;
+        background: var(--card);
+        backdrop-filter: blur(5px);
+        padding: 18px;
+        box-shadow: 0 14px 40px rgba(0, 0, 0, 0.08);
+      }
+
+      .controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-bottom: 14px;
+      }
+
+      button {
+        border: 0;
+        border-radius: 999px;
+        padding: 10px 16px;
+        font-size: 0.95rem;
+        font-family: inherit;
+        cursor: pointer;
+        transition: transform 120ms ease, filter 120ms ease;
+      }
+
+      button:hover {
+        transform: translateY(-1px);
+        filter: brightness(1.04);
+      }
+
+      button:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+        transform: none;
+      }
+
+      #startBtn {
+        background: var(--accent-2);
+        color: #fff;
+      }
+
+      #stopBtn {
+        background: var(--accent);
+        color: #fff;
+      }
+
+      .status {
+        margin: 0 0 14px;
+        color: var(--muted);
+        font-style: italic;
+      }
+
+      .log {
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.7);
+        min-height: 300px;
+        max-height: 50vh;
+        overflow: auto;
+        padding: 12px;
+      }
+
+      .line {
+        margin: 0 0 10px;
+        line-height: 1.35;
+      }
+
+      .line .role {
+        font-weight: 700;
+      }
+
+      .line.user .role {
+        color: #106c4a;
+      }
+
+      .line.model .role {
+        color: #8c261d;
+      }
+
+      .line.system {
+        color: #4e5968;
+      }
+
+      @media (max-width: 620px) {
+        .panel {
+          padding: 14px;
+        }
+
+        .log {
+          min-height: 240px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <h1 class="title">Il Professore</h1>
+      <p class="subtitle">Real-time Italian tutor powered by Gemini Live speech-to-speech.</p>
+
+      <section class="panel">
+        <div class="controls">
+          <button id="startBtn">Start Lesson</button>
+          <button id="stopBtn" disabled>End Lesson</button>
+        </div>
+
+        <p class="status" id="status">Idle.</p>
+        <div class="log" id="log"></div>
+      </section>
+    </main>
+
+    <script>
+      const startBtn = document.getElementById('startBtn');
+      const stopBtn = document.getElementById('stopBtn');
+      const statusEl = document.getElementById('status');
+      const logEl = document.getElementById('log');
+
+      let ws = null;
+      let stream = null;
+      let audioContext = null;
+      let micProcessor = null;
+      let micSource = null;
+      let sessionReady = false;
+
+      const playbackQueue = [];
+      let isPlaying = false;
+      let playbackCtx = null;
+
+      function logLine(role, text) {
+        const p = document.createElement('p');
+        p.className = `line ${role}`;
+        if (role === 'user' || role === 'model') {
+          const label = role === 'user' ? 'You' : 'Il Professore';
+          p.innerHTML = `<span class="role">${label}:</span> ${text}`;
+        } else {
+          p.textContent = text;
+        }
+        logEl.appendChild(p);
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      function setStatus(text) {
+        statusEl.textContent = text;
+      }
+
+      function decodeInt16ToFloat32(int16) {
+        const out = new Float32Array(int16.length);
+        for (let i = 0; i < int16.length; i += 1) {
+          out[i] = Math.max(-1, Math.min(1, int16[i] / 32768));
+        }
+        return out;
+      }
+
+      function enqueuePlayback(arrayBuffer) {
+        const int16 = new Int16Array(arrayBuffer);
+        playbackQueue.push(int16);
+        if (!isPlaying) {
+          void playQueue();
+        }
+      }
+
+      async function playQueue() {
+        isPlaying = true;
+        if (!playbackCtx) {
+          playbackCtx = new AudioContext({ sampleRate: 24000 });
+        }
+
+        while (playbackQueue.length > 0) {
+          const int16 = playbackQueue.shift();
+          if (!int16) continue;
+
+          const floatData = decodeInt16ToFloat32(int16);
+          const buffer = playbackCtx.createBuffer(1, floatData.length, 24000);
+          buffer.copyToChannel(floatData, 0);
+
+          await new Promise((resolve) => {
+            const source = playbackCtx.createBufferSource();
+            source.buffer = buffer;
+            source.connect(playbackCtx.destination);
+            source.onended = resolve;
+            source.start();
+          });
+        }
+
+        isPlaying = false;
+      }
+
+      function stopMicCapture() {
+        if (micProcessor) {
+          micProcessor.disconnect();
+          micProcessor.onaudioprocess = null;
+          micProcessor = null;
+        }
+
+        if (micSource) {
+          micSource.disconnect();
+          micSource = null;
+        }
+
+        if (audioContext) {
+          void audioContext.close();
+          audioContext = null;
+        }
+
+        if (stream) {
+          stream.getTracks().forEach((track) => track.stop());
+          stream = null;
+        }
+      }
+
+      async function startMicCapture() {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            channelCount: 1,
+            sampleRate: 16000,
+            echoCancellation: true,
+            noiseSuppression: true,
+          },
+        });
+
+        audioContext = new AudioContext({ sampleRate: 16000 });
+        micSource = audioContext.createMediaStreamSource(stream);
+        micProcessor = audioContext.createScriptProcessor(4096, 1, 1);
+
+        micProcessor.onaudioprocess = (event) => {
+          if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+          const input = event.inputBuffer.getChannelData(0);
+          const pcm16 = new Int16Array(input.length);
+          for (let i = 0; i < input.length; i += 1) {
+            const s = Math.max(-1, Math.min(1, input[i]));
+            pcm16[i] = s < 0 ? s * 32768 : s * 32767;
+          }
+
+          ws.send(pcm16.buffer);
+        };
+
+        micSource.connect(micProcessor);
+        micProcessor.connect(audioContext.destination);
+      }
+
+      async function startSession() {
+        if (ws) return;
+
+        sessionReady = false;
+        startBtn.disabled = true;
+        setStatus('Connecting...');
+
+        const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        ws = new WebSocket(`${scheme}//${window.location.host}`);
+        ws.binaryType = 'arraybuffer';
+
+        ws.onopen = async () => {
+          try {
+            await startMicCapture();
+            ws.send(JSON.stringify({ type: 'start_session' }));
+            stopBtn.disabled = false;
+            setStatus('Connecting to Il Professore...');
+            logLine('system', 'Microphone ready. Waiting for Il Professore...');
+          } catch (err) {
+            logLine('system', `Microphone error: ${err instanceof Error ? err.message : String(err)}`);
+            stopSession();
+          }
+        };
+
+        ws.onmessage = (event) => {
+          if (typeof event.data === 'string') {
+            try {
+              const msg = JSON.parse(event.data);
+              if (msg.type === 'status') setStatus(msg.message);
+              if (msg.type === 'status' && typeof msg.message === 'string' && msg.message.includes('Connected!')) {
+                if (!sessionReady) {
+                  sessionReady = true;
+                  logLine('system', 'Session started.');
+                }
+              }
+              if (msg.type === 'error') {
+                setStatus('Connection failed. Please try again.');
+                logLine('system', `Error: ${msg.message}`);
+                stopSession();
+              }
+              if (msg.type === 'transcript') logLine(msg.role, msg.text);
+            } catch {
+              logLine('system', event.data);
+            }
+            return;
+          }
+
+          if (event.data instanceof ArrayBuffer) {
+            enqueuePlayback(event.data);
+          }
+        };
+
+        ws.onerror = () => {
+          logLine('system', 'WebSocket error.');
+        };
+
+        ws.onclose = () => {
+          stopMicCapture();
+          sessionReady = false;
+          ws = null;
+          startBtn.disabled = false;
+          stopBtn.disabled = true;
+          setStatus('Disconnected.');
+          logLine('system', 'Session ended.');
+        };
+      }
+
+      function stopSession() {
+        if (!ws) return;
+
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'end_session' }));
+          ws.close();
+        } else {
+          ws = null;
+        }
+
+        stopMicCapture();
+      }
+
+      startBtn.addEventListener('click', () => {
+        void startSession();
+      });
+
+      stopBtn.addEventListener('click', () => {
+        stopSession();
+      });
+    </script>
+  </body>
+</html>
