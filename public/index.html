@@ -175,14 +175,20 @@
       let micSource = null;
       let sessionReady = false;
 
-      const playbackQueue = [];
-      let isPlaying = false;
-      let playbackCtx = null;
-      let currentAudioSource = null; // Memorizza il nodo in riproduzione per poterlo stoppare
+      // ── Playback state ──────────────────────────────────────────────────────
+      // Gemini outputs 24kHz mono Int16 PCM.
+      // We use a dedicated AudioContext locked to 24000 Hz so the browser
+      // never silently resamples the audio (which was the root cause of
+      // quality degradation with the raw binary frame approach).
+      const PLAYBACK_SAMPLE_RATE = 24000;
+      const MIC_SAMPLE_RATE = 16000;
+      const INTERRUPT_THRESHOLD = 0.02;
 
-      // Soglia di volume per interrompere il bot (da 0.0 a 1.0). 
-      // 0.02 è un buon valore per evitare che i rumori di fondo lo blocchino.
-      const INTERRUPT_THRESHOLD = 0.02; 
+      let playbackCtx = null;
+      let nextPlaybackTime = 0;
+      const activePlaybackSources = new Set();
+
+      // ── Helpers ─────────────────────────────────────────────────────────────
 
       function logLine(role, text) {
         const p = document.createElement('p');
@@ -201,63 +207,123 @@
         statusEl.textContent = text;
       }
 
-      function decodeInt16ToFloat32(int16) {
-        const out = new Float32Array(int16.length);
-        for (let i = 0; i < int16.length; i += 1) {
-          out[i] = Math.max(-1, Math.min(1, int16[i] / 32768));
+      // Convert signed Int16 PCM samples to Float32 [-1, 1]
+      function int16ToFloat32(int16Array) {
+        const out = new Float32Array(int16Array.length);
+        for (let i = 0; i < int16Array.length; i++) {
+          out[i] = Math.max(-1, Math.min(1, int16Array[i] / 32768));
         }
         return out;
       }
 
-      // --- NUOVA FUNZIONE: Zittisce l'audio immediatamente ---
+      // Convert Float32 [-1, 1] to signed Int16 PCM
+      function float32ToInt16(floatArray) {
+        const out = new Int16Array(floatArray.length);
+        for (let i = 0; i < floatArray.length; i++) {
+          const s = Math.max(-1, Math.min(1, floatArray[i]));
+          out[i] = s < 0 ? s * 32768 : s * 32767;
+        }
+        return out;
+      }
+
+      // Linear resample from sourceRate to targetRate for mono Float32 PCM
+      function resampleMonoFloat32(floatArray, sourceRate, targetRate) {
+        if (sourceRate === targetRate) return floatArray;
+        const ratio = sourceRate / targetRate;
+        const outLength = Math.max(1, Math.floor(floatArray.length / ratio));
+        const out = new Float32Array(outLength);
+
+        for (let i = 0; i < outLength; i++) {
+          const srcIndex = i * ratio;
+          const index0 = Math.floor(srcIndex);
+          const index1 = Math.min(index0 + 1, floatArray.length - 1);
+          const frac = srcIndex - index0;
+          out[i] = floatArray[index0] * (1 - frac) + floatArray[index1] * frac;
+        }
+
+        return out;
+      }
+
+      // Decode a base64 string to an ArrayBuffer
+      function base64ToArrayBuffer(b64) {
+        const binary = atob(b64);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) {
+          bytes[i] = binary.charCodeAt(i);
+        }
+        return bytes.buffer;
+      }
+
+      // Encode an ArrayBuffer (or typed array buffer) to base64
+      function arrayBufferToBase64(buffer) {
+        const bytes = new Uint8Array(buffer);
+        let binary = '';
+        for (let i = 0; i < bytes.byteLength; i++) {
+          binary += String.fromCharCode(bytes[i]);
+        }
+        return btoa(binary);
+      }
+
+      // ── Playback ─────────────────────────────────────────────────────────────
+
       function stopAndClearPlayback() {
-        playbackQueue.length = 0; // Svuota la coda
-        if (currentAudioSource) {
-          try {
-            currentAudioSource.stop(); // Ferma il chunk attualmente in esecuzione
-          } catch (e) {
-            // Ignora errori se è già fermato
-          }
-          currentAudioSource = null;
+        for (const source of activePlaybackSources) {
+          try { source.stop(); } catch (_) {}
         }
+        activePlaybackSources.clear();
+        nextPlaybackTime = 0;
       }
 
-      function enqueuePlayback(arrayBuffer) {
-        const int16 = new Int16Array(arrayBuffer);
-        playbackQueue.push(int16);
-        if (!isPlaying) {
-          void playQueue();
-        }
+      // Called when a tts_audio JSON message arrives.
+      // data is the base64 string from the server.
+      function enqueueTtsAudio(b64data) {
+        const arrayBuffer = base64ToArrayBuffer(b64data);
+
+        // Safety: ensure even byte count for Int16 interpretation
+        const byteLen = arrayBuffer.byteLength % 2 !== 0
+          ? arrayBuffer.byteLength - 1
+          : arrayBuffer.byteLength;
+
+        const int16 = new Int16Array(arrayBuffer, 0, byteLen / 2);
+        schedulePlaybackChunk(int16);
       }
 
-      async function playQueue() {
-        if (isPlaying) return; // Evita esecuzioni multiple concorrenti
-        isPlaying = true;
-        
+      function schedulePlaybackChunk(int16) {
         if (!playbackCtx) {
-          playbackCtx = new AudioContext({ sampleRate: 24000 });
+          // Lock to exactly 24000 Hz — matches Gemini Live output rate.
+          // This is the key fix: the old raw-binary path let the browser
+          // create an AudioContext at its default rate (44100/48000 Hz)
+          // and silently resample, causing degraded quality.
+          playbackCtx = new AudioContext({ sampleRate: PLAYBACK_SAMPLE_RATE });
         }
 
-        while (playbackQueue.length > 0) {
-          const int16 = playbackQueue.shift();
-          if (!int16) continue;
-
-          const floatData = decodeInt16ToFloat32(int16);
-          const buffer = playbackCtx.createBuffer(1, floatData.length, 24000);
-          buffer.copyToChannel(floatData, 0);
-
-          await new Promise((resolve) => {
-            currentAudioSource = playbackCtx.createBufferSource();
-            currentAudioSource.buffer = buffer;
-            currentAudioSource.connect(playbackCtx.destination);
-            currentAudioSource.onended = resolve;
-            currentAudioSource.start();
-          });
-          currentAudioSource = null;
+        if (playbackCtx.state === 'suspended') {
+          void playbackCtx.resume();
         }
 
-        isPlaying = false;
+        const floatData = int16ToFloat32(int16);
+        const audioBuffer = playbackCtx.createBuffer(1, floatData.length, PLAYBACK_SAMPLE_RATE);
+        audioBuffer.copyToChannel(floatData, 0);
+
+        const source = playbackCtx.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(playbackCtx.destination);
+
+        // Schedule chunks on the audio timeline to avoid event-loop gaps.
+        const now = playbackCtx.currentTime;
+        if (nextPlaybackTime < now + 0.01) {
+          nextPlaybackTime = now + 0.01;
+        }
+
+        activePlaybackSources.add(source);
+        source.onended = () => {
+          activePlaybackSources.delete(source);
+        };
+        source.start(nextPlaybackTime);
+        nextPlaybackTime += audioBuffer.duration;
       }
+      
+      // ── Mic capture ──────────────────────────────────────────────────────────
 
       function stopMicCapture() {
         if (micProcessor) {
@@ -283,13 +349,16 @@
         stream = await navigator.mediaDevices.getUserMedia({
           audio: {
             channelCount: 1,
-            sampleRate: 16000,
+            sampleRate: MIC_SAMPLE_RATE,  // Request 16kHz from the browser
             echoCancellation: true,
             noiseSuppression: true,
           },
         });
 
-        audioContext = new AudioContext({ sampleRate: 16000 });
+        // Force the AudioContext to 16kHz regardless of what the browser
+        // negotiated for the mic. This guarantees Gemini receives audio at
+        // the correct rate even if the OS/driver ignored the sampleRate hint.
+        audioContext = new AudioContext({ sampleRate: MIC_SAMPLE_RATE });
         micSource = audioContext.createMediaStreamSource(stream);
         micProcessor = audioContext.createScriptProcessor(4096, 1, 1);
 
@@ -297,32 +366,34 @@
           if (!ws || ws.readyState !== WebSocket.OPEN) return;
 
           const input = event.inputBuffer.getChannelData(0);
-          
-          // --- NUOVO: Calcolo rapido del volume (RMS) ---
+
+          // Interrupt bot playback if the user speaks above threshold
           let sum = 0;
           for (let i = 0; i < input.length; i++) {
             sum += input[i] * input[i];
           }
-          const rms = Math.sqrt(sum / input.length);
-
-          // Se il volume supera la soglia, svuota la coda di riproduzione
-          if (rms > INTERRUPT_THRESHOLD) {
+          if (Math.sqrt(sum / input.length) > INTERRUPT_THRESHOLD) {
             stopAndClearPlayback();
           }
-          // ----------------------------------------------
 
-          const pcm16 = new Int16Array(input.length);
-          for (let i = 0; i < input.length; i += 1) {
-            const s = Math.max(-1, Math.min(1, input[i]));
-            pcm16[i] = s < 0 ? s * 32768 : s * 32767;
-          }
+          // Convert Float32 → Int16 PCM and send as JSON+base64.
+          // If the runtime context rate is not 16kHz, resample first.
+          const sourceRate = audioContext ? audioContext.sampleRate : MIC_SAMPLE_RATE;
+          const mono16k = resampleMonoFloat32(input, sourceRate, MIC_SAMPLE_RATE);
 
-          ws.send(pcm16.buffer);
+          // Using JSON+base64 (instead of raw binary frames) ensures the
+          // server knows exactly what it is receiving and applies the correct
+          // byte-alignment checks before passing to Gemini.
+          const int16 = float32ToInt16(mono16k);
+          const b64 = arrayBufferToBase64(int16.buffer);
+          ws.send(JSON.stringify({ type: 'audio_chunk', data: b64 }));
         };
 
         micSource.connect(micProcessor);
         micProcessor.connect(audioContext.destination);
       }
+
+      // ── WebSocket session ────────────────────────────────────────────────────
 
       async function startSession() {
         if (ws) return;
@@ -333,6 +404,7 @@
 
         const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         ws = new WebSocket(`${scheme}//${window.location.host}`);
+        // All frames are text (JSON). No binary frames expected.
         ws.binaryType = 'arraybuffer';
 
         ws.onopen = async () => {
@@ -349,32 +421,42 @@
         };
 
         ws.onmessage = (event) => {
-          if (typeof event.data === 'string') {
-            try {
-              const msg = JSON.parse(event.data);
-              if (msg.type === 'status') setStatus(msg.message);
-              if (msg.type === 'status' && typeof msg.message === 'string' && msg.message.includes('Connected!')) {
-                if (!sessionReady) {
-                  sessionReady = true;
-                  logLine('system', 'Session started.');
-                }
-              }
-              if (msg.type === 'error') {
-                setStatus('Connection failed. Please try again.');
-                logLine('system', `Error: ${msg.message}`);
-                stopSession();
-              }
-              if (msg.type === 'transcript') {
-                logLine(msg.role, msg.text);
-              }
-            } catch {
-              logLine('system', event.data);
-            }
+          // All server messages are JSON text frames
+          if (typeof event.data !== 'string') return;
+
+          let msg;
+          try {
+            msg = JSON.parse(event.data);
+          } catch {
+            logLine('system', event.data);
             return;
           }
 
-          if (event.data instanceof ArrayBuffer) {
-            enqueuePlayback(event.data);
+          if (msg.type === 'status') {
+            setStatus(msg.message);
+            if (typeof msg.message === 'string' && msg.message.includes('Connected!') && !sessionReady) {
+              sessionReady = true;
+              logLine('system', 'Session started.');
+            }
+          }
+
+          if (msg.type === 'error') {
+            setStatus('Connection failed. Please try again.');
+            logLine('system', `Error: ${msg.message}`);
+            stopSession();
+          }
+
+          if (msg.type === 'transcript') {
+            logLine(msg.role, msg.text);
+          }
+
+          // ── Gemini audio output ──────────────────────────────────────────
+          // The server sends { type: 'tts_audio', data: '<base64>' }.
+          // The base64 payload is raw Int16 PCM at 24kHz mono.
+          // We decode it here and feed it into a 24kHz AudioContext so the
+          // browser never needs to resample.
+          if (msg.type === 'tts_audio' && msg.data) {
+            enqueueTtsAudio(msg.data);
           }
         };
 
@@ -407,13 +489,8 @@
         stopMicCapture();
       }
 
-      startBtn.addEventListener('click', () => {
-        void startSession();
-      });
-
-      stopBtn.addEventListener('click', () => {
-        stopSession();
-      });
+      startBtn.addEventListener('click', () => { void startSession(); });
+      stopBtn.addEventListener('click', () => { stopSession(); });
     </script>
   </body>
 </html>

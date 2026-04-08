@@ -4,14 +4,14 @@
 // It owns a ProfessorAgent and pipes audio in both directions:
 //   Browser mic PCM → GeminiLive → Browser speaker PCM
 //
-// Protocol (binary frames = audio, text frames = JSON control messages):
+// Protocol (all text frames, JSON):
 //   Browser → Server  { type: 'start_session' }
 //   Browser → Server  { type: 'end_session' }
-//   Browser → Server  ArrayBuffer (raw Int16 PCM audio chunks, 16kHz mono)
+//   Browser → Server  { type: 'audio_chunk', data: string }   ← base64 Int16 PCM, 16kHz mono
 //   Server  → Browser { type: 'transcript', role: 'user'|'model', text: string }
 //   Server  → Browser { type: 'status',     message: string }
 //   Server  → Browser { type: 'error',      message: string }
-//   Server  → Browser ArrayBuffer (raw Int16 PCM audio from Gemini, 24kHz mono)
+//   Server  → Browser { type: 'tts_audio',  data: string }    ← base64 Int16 PCM, 24kHz mono
 
 import { WebSocket, type RawData } from 'ws';
 import { createProfessorAgent, type ProfessorAgent } from '../agent/professorFactory.js';
@@ -21,6 +21,8 @@ export class SessionHandler {
   private professor: ProfessorAgent | null = null;
   private sessionId: string;
   private isStarting = false;
+  private pendingMicByte: Buffer | null = null;
+  private pendingTtsByte: Buffer | null = null;
 
   constructor(ws: WebSocket, sessionId: string) {
     this.ws = ws;
@@ -35,18 +37,17 @@ export class SessionHandler {
     this.ws.on('message', (data: RawData) => {
       const normalized = this.normalizeIncomingMessage(data);
 
+      // All messages are JSON text frames — audio_chunk carries base64 payload
       if (typeof normalized === 'string') {
         this.handleControlMessage(normalized);
         return;
       }
 
-      if (!this.isLikelyBinaryAudio(normalized)) {
-        this.handleControlMessage(normalized.toString());
-        return;
+      // Some ws clients deliver text frames as Buffer, so decode and parse JSON.
+      const asString = normalized.toString();
+      if (asString[0] === '{') {
+        this.handleControlMessage(asString);
       }
-
-      // Binary frame = raw PCM audio from the browser microphone
-      this.handleAudioChunk(normalized);
     });
 
     this.ws.on('close', () => {
@@ -60,11 +61,6 @@ export class SessionHandler {
     });
   }
 
-  private isLikelyBinaryAudio(buf: Buffer): boolean {
-    // If the first byte is '{' (0x7B) it's JSON; otherwise treat as audio
-    return buf[0] !== 0x7b;
-  }
-
   private normalizeIncomingMessage(data: RawData): Buffer | string {
     if (typeof data === 'string') return data;
     if (data instanceof ArrayBuffer) return Buffer.from(data);
@@ -75,7 +71,7 @@ export class SessionHandler {
   // ─── Control Messages ───────────────────────────────────────────────────────
 
   private async handleControlMessage(raw: string) {
-    let msg: { type: string };
+    let msg: { type: string; data?: string };
     try {
       msg = JSON.parse(raw);
     } catch {
@@ -89,6 +85,38 @@ export class SessionHandler {
         break;
       case 'end_session':
         await this.cleanup();
+        break;
+      case 'audio_chunk':
+        // Browser sends mic audio as base64-encoded Int16 PCM (16kHz mono)
+        if (!msg.data || !this.professor) break;
+
+        {
+          let decoded = Buffer.from(msg.data, 'base64');
+
+          // Preserve alignment across chunk boundaries to avoid dropping bytes.
+          if (this.pendingMicByte) {
+            decoded = Buffer.concat([this.pendingMicByte, decoded]);
+            this.pendingMicByte = null;
+          }
+
+          let aligned = decoded;
+          if (decoded.byteLength % 2 !== 0) {
+            this.pendingMicByte = decoded.slice(decoded.byteLength - 1);
+            aligned = decoded.slice(0, decoded.byteLength - 1);
+          }
+
+          if (aligned.byteLength === 0) break;
+
+          try {
+            const int16 = new Int16Array(aligned.buffer, aligned.byteOffset, aligned.byteLength / 2);
+            await this.professor.voice.send(int16);
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            if (!msg.includes('closed')) {
+              console.warn(`[${this.sessionId}] Audio send error:`, msg);
+            }
+          }
+        }
         break;
       default:
         console.warn(`[${this.sessionId}] Unknown message type: ${msg.type}`);
@@ -119,19 +147,37 @@ export class SessionHandler {
         audioStream.on('data', (chunk: Buffer | Uint8Array | string) => {
           if (this.ws.readyState !== WebSocket.OPEN) return;
 
-          const buffer =
+          let buf: Buffer =
             typeof chunk === 'string'
               ? Buffer.from(chunk)
               : Buffer.isBuffer(chunk)
                 ? chunk
                 : Buffer.from(chunk);
 
-          // Send raw PCM as a binary frame
-          this.ws.send(buffer);
+          // Preserve alignment across chunk boundaries to avoid dropping bytes.
+          if (this.pendingTtsByte) {
+            buf = Buffer.concat([this.pendingTtsByte, buf]);
+            this.pendingTtsByte = null;
+          }
+
+          if (buf.byteLength % 2 !== 0) {
+            this.pendingTtsByte = buf.slice(buf.byteLength - 1);
+            buf = buf.slice(0, buf.byteLength - 1);
+          }
+
+          if (buf.byteLength === 0) return;
+
+          // Send as JSON+base64 so the browser decodes at the correct
+          // 24kHz sample rate with no format ambiguity
+          this.sendJSON({ type: 'tts_audio', data: buf.toString('base64') });
         });
 
         audioStream.on('error', (streamErr: Error) => {
           console.warn(`[${this.sessionId}] Speaker stream error:`, streamErr.message);
+        });
+
+        audioStream.on('end', () => {
+          this.pendingTtsByte = null;
         });
       });
 
@@ -159,7 +205,8 @@ export class SessionHandler {
       // Gemini 3.1 rejects `client_content` (used by voice.speak()) mid-session.
       // The correct approach is `realtimeInput` with a `text` field, sent raw
       // over the underlying WebSocket that Mastra exposes via connectionManager.
-      this.geminiSpeakFirst(voice, 'Sei l\'assistente di MemorAIz. Presentati, poi chiedi all\'utente come puoi aiutarlo oggi.');
+      this.geminiSpeakFirst(voice, `Sei l'assistente di MemorAIz.
+      Presentati, poi chiedi all'utente come puoi aiutarlo oggi.`);
 
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -184,7 +231,6 @@ export class SessionHandler {
   //
   private geminiSpeakFirst(voice: any, text: string) {
     try {
-      // Try the documented getWebSocket() accessor on connectionManager first
       const geminiWs: WebSocket | undefined =
         voice?.connectionManager?.getWebSocket?.() ??
         voice?.connectionManager?.ws ??
@@ -200,14 +246,7 @@ export class SessionHandler {
         return;
       }
 
-      // Gemini 3.1 Live API: inject text as a realtime input turn.
-      // The model will respond to this and speak first.
-      const message = JSON.stringify({
-        realtimeInput: {
-          text,
-        },
-      });
-
+      const message = JSON.stringify({ realtimeInput: { text } });
       geminiWs.send(message);
       console.log(`[${this.sessionId}] geminiSpeakFirst: sent realtimeInput text → "${text}"`);
     } catch (err) {
@@ -216,28 +255,12 @@ export class SessionHandler {
     }
   }
 
-  // ─── Audio Routing ──────────────────────────────────────────────────────────
-
-  private async handleAudioChunk(buf: Buffer) {
-    if (!this.professor) return;
-    if (this.ws.readyState !== WebSocket.OPEN) return;
-
-    try {
-      // Convert the raw buffer to Int16Array (matches Gemini's expected format)
-      const int16 = new Int16Array(buf.buffer, buf.byteOffset, buf.byteLength / 2);
-      await this.professor.voice.send(int16);
-    } catch (err) {
-      // Don't crash on individual chunk send errors (common if connection drops)
-      const msg = err instanceof Error ? err.message : String(err);
-      if (!msg.includes('closed')) {
-        console.warn(`[${this.sessionId}] Audio send error:`, msg);
-      }
-    }
-  }
-
   // ─── Cleanup ────────────────────────────────────────────────────────────────
 
   private async cleanup() {
+    this.pendingMicByte = null;
+    this.pendingTtsByte = null;
+
     if (this.professor) {
       await this.professor.destroy();
       this.professor = null;
