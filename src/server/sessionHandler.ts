@@ -151,19 +151,15 @@ export class SessionHandler {
       await voice.connect();
 
       // Mark session as active only after the voice connection is established.
-      // This prevents early mic chunks from being sent before connect() finishes.
       this.professor = createdProfessor;
 
       this.sendStatus('Connected! MemorAIz Assistant is ready.');
 
-
-      //
-      // IF YOU USE GEMINI-LIVE-3.1, REMOVE THIS BLOCK — Gemini 3.1 sends audio from the start of the session without needing a warm-up prompt.
-      // Gemini 2.5 required an initial prompt to "warm up" the session and start the audio stream, but Gemini 3.1 starts streaming audio immediately upon connection.
-    
-      // await voice.speak( // this is the first thing that Gemini will hear
-      //   "Ciao, sono Luca"
-      // );
+      // ── Gemini 3.1: trigger the model to speak first ───────────────────────
+      // Gemini 3.1 rejects `client_content` (used by voice.speak()) mid-session.
+      // The correct approach is `realtimeInput` with a `text` field, sent raw
+      // over the underlying WebSocket that Mastra exposes via connectionManager.
+      this.geminiSpeakFirst(voice, 'Ciao! Sono pronto ad aiutarti.');
 
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -176,6 +172,47 @@ export class SessionHandler {
       }
     } finally {
       this.isStarting = false;
+    }
+  }
+
+  // ─── Gemini 3.1 "speak first" ───────────────────────────────────────────────
+  //
+  // voice.speak() sends `client_content`, which Gemini 3.1 rejects with 1007.
+  // Instead we send `realtimeInput: { text }` directly on the raw WebSocket.
+  // Mastra keeps the underlying WS on voice.connectionManager (accessible via
+  // getWebSocket()), which we reach through the `any` cast.
+  //
+  private geminiSpeakFirst(voice: any, text: string) {
+    try {
+      // Try the documented getWebSocket() accessor on connectionManager first
+      const geminiWs: WebSocket | undefined =
+        voice?.connectionManager?.getWebSocket?.() ??
+        voice?.connectionManager?.ws ??
+        voice?.ws;
+
+      if (!geminiWs) {
+        console.warn(`[${this.sessionId}] geminiSpeakFirst: could not find underlying WebSocket`);
+        return;
+      }
+
+      if (geminiWs.readyState !== WebSocket.OPEN) {
+        console.warn(`[${this.sessionId}] geminiSpeakFirst: WebSocket not open (state=${geminiWs.readyState})`);
+        return;
+      }
+
+      // Gemini 3.1 Live API: inject text as a realtime input turn.
+      // The model will respond to this and speak first.
+      const message = JSON.stringify({
+        realtimeInput: {
+          text,
+        },
+      });
+
+      geminiWs.send(message);
+      console.log(`[${this.sessionId}] geminiSpeakFirst: sent realtimeInput text → "${text}"`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[${this.sessionId}] geminiSpeakFirst failed:`, msg);
     }
   }
 
