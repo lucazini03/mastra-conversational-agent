@@ -178,6 +178,11 @@
       const playbackQueue = [];
       let isPlaying = false;
       let playbackCtx = null;
+      let currentAudioSource = null; // Memorizza il nodo in riproduzione per poterlo stoppare
+
+      // Soglia di volume per interrompere il bot (da 0.0 a 1.0). 
+      // 0.02 è un buon valore per evitare che i rumori di fondo lo blocchino.
+      const INTERRUPT_THRESHOLD = 0.02; 
 
       function logLine(role, text) {
         const p = document.createElement('p');
@@ -204,6 +209,19 @@
         return out;
       }
 
+      // --- NUOVA FUNZIONE: Zittisce l'audio immediatamente ---
+      function stopAndClearPlayback() {
+        playbackQueue.length = 0; // Svuota la coda
+        if (currentAudioSource) {
+          try {
+            currentAudioSource.stop(); // Ferma il chunk attualmente in esecuzione
+          } catch (e) {
+            // Ignora errori se è già fermato
+          }
+          currentAudioSource = null;
+        }
+      }
+
       function enqueuePlayback(arrayBuffer) {
         const int16 = new Int16Array(arrayBuffer);
         playbackQueue.push(int16);
@@ -213,7 +231,9 @@
       }
 
       async function playQueue() {
+        if (isPlaying) return; // Evita esecuzioni multiple concorrenti
         isPlaying = true;
+        
         if (!playbackCtx) {
           playbackCtx = new AudioContext({ sampleRate: 24000 });
         }
@@ -227,12 +247,13 @@
           buffer.copyToChannel(floatData, 0);
 
           await new Promise((resolve) => {
-            const source = playbackCtx.createBufferSource();
-            source.buffer = buffer;
-            source.connect(playbackCtx.destination);
-            source.onended = resolve;
-            source.start();
+            currentAudioSource = playbackCtx.createBufferSource();
+            currentAudioSource.buffer = buffer;
+            currentAudioSource.connect(playbackCtx.destination);
+            currentAudioSource.onended = resolve;
+            currentAudioSource.start();
           });
+          currentAudioSource = null;
         }
 
         isPlaying = false;
@@ -244,17 +265,14 @@
           micProcessor.onaudioprocess = null;
           micProcessor = null;
         }
-
         if (micSource) {
           micSource.disconnect();
           micSource = null;
         }
-
         if (audioContext) {
           void audioContext.close();
           audioContext = null;
         }
-
         if (stream) {
           stream.getTracks().forEach((track) => track.stop());
           stream = null;
@@ -279,6 +297,20 @@
           if (!ws || ws.readyState !== WebSocket.OPEN) return;
 
           const input = event.inputBuffer.getChannelData(0);
+          
+          // --- NUOVO: Calcolo rapido del volume (RMS) ---
+          let sum = 0;
+          for (let i = 0; i < input.length; i++) {
+            sum += input[i] * input[i];
+          }
+          const rms = Math.sqrt(sum / input.length);
+
+          // Se il volume supera la soglia, svuota la coda di riproduzione
+          if (rms > INTERRUPT_THRESHOLD) {
+            stopAndClearPlayback();
+          }
+          // ----------------------------------------------
+
           const pcm16 = new Int16Array(input.length);
           for (let i = 0; i < input.length; i += 1) {
             const s = Math.max(-1, Math.min(1, input[i]));
@@ -332,7 +364,9 @@
                 logLine('system', `Error: ${msg.message}`);
                 stopSession();
               }
-              if (msg.type === 'transcript') logLine(msg.role, msg.text);
+              if (msg.type === 'transcript') {
+                logLine(msg.role, msg.text);
+              }
             } catch {
               logLine('system', event.data);
             }
@@ -349,6 +383,7 @@
         };
 
         ws.onclose = () => {
+          stopAndClearPlayback();
           stopMicCapture();
           sessionReady = false;
           ws = null;

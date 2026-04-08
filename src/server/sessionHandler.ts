@@ -108,7 +108,7 @@ export class SessionHandler {
     let createdProfessor: ProfessorAgent | null = null;
 
     try {
-      this.sendStatus('Connecting to Il Professore...');
+      this.sendStatus('Connecting to MemorAIz Assistant...');
 
       // Create a fresh, isolated agent for this user
       createdProfessor = createProfessorAgent();
@@ -154,14 +154,16 @@ export class SessionHandler {
       // This prevents early mic chunks from being sent before connect() finishes.
       this.professor = createdProfessor;
 
-      this.sendStatus('Connected! Il Professore is ready.');
+      this.sendStatus('Connected! MemorAIz Assistant is ready.');
 
-      // Kick off the conversation with a greeting
-      await voice.speak(
-        "Benvenuto! Welcome! I am Il Professore, your Italian language tutor. " +
-        "Are you a beginner, intermediate, or advanced student? " +
-        "Sei principiante, intermedio, o avanzato?"
-      );
+
+      //
+      // IF YOU USE GEMINI-LIVE-3.1, REMOVE THIS BLOCK — Gemini 3.1 sends audio from the start of the session without needing a warm-up prompt.
+      // Gemini 2.5 required an initial prompt to "warm up" the session and start the audio stream, but Gemini 3.1 starts streaming audio immediately upon connection.
+    
+      // await voice.speak( // this is the first thing that Gemini will hear
+      //   "Ciao, sono Luca"
+      // );
 
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

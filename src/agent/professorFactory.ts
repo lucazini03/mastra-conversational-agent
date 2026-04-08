@@ -10,6 +10,32 @@ import { Agent } from '@mastra/core/agent';
 import { GeminiLiveVoice } from '@mastra/voice-google-gemini-live';
 import { PROFESSOR_INSTRUCTIONS, VOICE_CONFIG } from '../config/professorConfig.js';
 
+function patchSetupForAudioResponses(voice: GeminiLiveVoice, speaker: string) {
+  // function that patches the GeminiLiveVoice instance to ensure it requests audio responses in the setup event.
+  const anyVoice = voice as any;
+  if (anyVoice.__audioSetupPatched) return;
+  if (typeof anyVoice.sendEvent !== 'function') return;
+
+  const originalSendEvent = anyVoice.sendEvent.bind(anyVoice);
+  anyVoice.sendEvent = (type: string, data: any) => {
+    if (type === 'setup' && data?.setup) {
+      data.setup.generation_config = data.setup.generation_config ?? {};
+      data.setup.generation_config.response_modalities =
+        data.setup.generation_config.response_modalities ?? ['AUDIO'];
+
+      data.setup.generation_config.speech_config = data.setup.generation_config.speech_config ?? {};
+      data.setup.generation_config.speech_config.voice_config =
+        data.setup.generation_config.speech_config.voice_config ?? {
+          prebuilt_voice_config: { voice_name: speaker },
+        };
+    }
+
+    return originalSendEvent(type, data);
+  };
+
+  anyVoice.__audioSetupPatched = true;
+}
+
 export interface ProfessorAgent {
   agent: Agent;
   voice: GeminiLiveVoice;
@@ -27,7 +53,8 @@ export function createProfessorAgent(): ProfessorAgent {
     throw new Error('GOOGLE_API_KEY is required. Copy .env.example to .env and fill it in.');
   }
 
-  const liveModel = (process.env.GEMINI_LIVE_MODEL ?? VOICE_CONFIG.model) as any;
+  const liveModel = (process.env.GEMINI_LIVE_MODEL ?? VOICE_CONFIG.model)
+    .replace(/^models\//, '') as any;
 
   const voice = new GeminiLiveVoice({
     apiKey,
@@ -35,17 +62,19 @@ export function createProfessorAgent(): ProfessorAgent {
     speaker: VOICE_CONFIG.speaker,
     sessionConfig: VOICE_CONFIG.sessionConfig,
     // Uncomment to enable verbose Gemini Live API logs:
-    // debug: true,
+    debug: true,
   });
+
+  patchSetupForAudioResponses(voice, VOICE_CONFIG.speaker);
 
   const agent = new Agent({
     id: 'professor-agent',
-    name: 'Il Professore',
+    name: 'MemorAIz Assistant',
     instructions: PROFESSOR_INSTRUCTIONS,
     // The model field here is the TEXT fallback for agent.generate() calls.
     // For real-time voice, GeminiLiveVoice handles everything — this field is
     // largely unused in STS mode but required by the Agent constructor.
-    model: `google/gemini-2.0-flash` as any,
+    model: `google/monkey` as any, // i named it monkey because it's a dummy value that will never be used, to avoid confusion with the GeminiLiveVoice model which is actually handling generation. The real model is determined by the GeminiLiveVoice connection, not this field.
     voice,
   });
 

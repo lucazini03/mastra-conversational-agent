@@ -42,10 +42,10 @@ async function main() {
   await voice.connect();
   console.log(chalk.green(' ✓ Connected!\n'));
 
-  await voice.speak(
-    "Benvenuto! I am Il Professore, your Italian tutor. " +
-    "Are you a beginner, intermediate, or advanced student?"
-  );
+  // await voice.speak(
+  //   "Benvenuto! I am Il Professore, your Italian tutor. " +
+  //   "Are you a beginner, intermediate, or advanced student?"
+  // );
 
   // ── Stream microphone to Gemini ─────────────────────────────────────────────
   const micStream = getMicrophoneStream();
