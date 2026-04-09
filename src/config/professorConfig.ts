@@ -40,7 +40,7 @@ Priorità: sii breve, umano, naturale e lascia sempre spazio all'utente per inte
 export const VOICE_CONFIG = {
   // IMPORTANT: pass bare model name; GeminiLiveVoice adds the `models/` prefix internally.
   model: 'gemini-3.1-flash-live-preview',
-  speaker: 'Kore' as const,
+  speaker: 'Charon' as const,
   sessionConfig: {
     interrupts: {
       enabled: true,

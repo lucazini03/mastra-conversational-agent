@@ -135,6 +135,23 @@
         color: #4e5968;
       }
 
+      .line.rag {
+        color: #6a2f12;
+      }
+
+      .line.rag .badge {
+        display: inline-block;
+        margin-right: 8px;
+        padding: 2px 8px;
+        border-radius: 999px;
+        font-size: 0.75rem;
+        letter-spacing: 0.04em;
+        font-weight: 700;
+        background: #f0c88b;
+        border: 1px solid #bb8b43;
+        color: #5a3609;
+      }
+
       @media (max-width: 620px) {
         .panel {
           padding: 14px;
@@ -196,6 +213,8 @@
         if (role === 'user' || role === 'model') {
           const label = role === 'user' ? 'You' : 'Il Professore';
           p.innerHTML = `<span class="role">${label}:</span> ${text}`;
+        } else if (role === 'rag') {
+          p.innerHTML = `<span class="badge">RAG TOOL CALLED</span>${text}`;
         } else {
           p.textContent = text;
         }
@@ -448,6 +467,22 @@
 
           if (msg.type === 'transcript') {
             logLine(msg.role, msg.text);
+          }
+
+          if (msg.type === 'rag_tool_called') {
+            const sourceList = Array.isArray(msg.sources) ? msg.sources : [];
+            const scoreList = Array.isArray(msg.scores) ? msg.scores : [];
+            const sourceText = sourceList.length > 0 ? sourceList.join(', ') : 'nessuna fonte';
+            const scoreText = scoreList
+              .slice(0, 3)
+              .map((s) => `${s.file}=${Number(s.score).toFixed(3)}`)
+              .join(' | ');
+
+            const details = scoreText
+              ? `query="${msg.query}" | fonti: ${sourceText} | top: ${scoreText}`
+              : `query="${msg.query}" | fonti: ${sourceText}`;
+
+            logLine('rag', details);
           }
 
           // ── Gemini audio output ──────────────────────────────────────────
