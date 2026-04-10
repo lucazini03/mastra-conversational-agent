@@ -15,7 +15,7 @@
 //   Server  → Browser { type: 'tts_audio',  data: string }    ← base64 Int16 PCM, 24kHz mono
 
 import { WebSocket, type RawData } from 'ws';
-import { createProfessorAgent, type ProfessorAgent } from '../agent/professorFactory.js';
+import { createProfessorAgent, type ProfessorAgent } from '../agent/agentFactory.js';
 import {
   DEFAULT_ASSISTANT_ID,
   getAssistantInstructions,

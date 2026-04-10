@@ -11,7 +11,7 @@ import 'dotenv/config';
 import { PassThrough } from 'node:stream';
 import chalk from 'chalk';
 import { getMicrophoneStream, playAudio } from '@mastra/node-audio';
-import { createProfessorAgent } from '../agent/professorFactory.js';
+import { createProfessorAgent } from '../agent/agentFactory.js';
 
 console.log(chalk.yellow('\n  MemorAIz assistant — CLI Test Mode'));
 console.log(chalk.yellow('  ─────────────────────────────'));
