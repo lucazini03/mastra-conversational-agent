@@ -496,10 +496,11 @@
       }
 
       async function startMicCapture() {
-        if (!window.vad || !window.vad.MicVAD) {
+        if (!window.vad || !window.vad.MicVAD) { 
           throw new Error('MicVAD runtime not loaded. Check /vad.bundle.min.js and /ort.min.js assets.');
         }
 
+        // nel browser usiamo MicVAD (API) che internamente carica il modello Silero; quindi è window.vad.MicVAD sopra Silero
         micVad = await window.vad.MicVAD.new({
           model: 'legacy',
           startOnLoad: false,
