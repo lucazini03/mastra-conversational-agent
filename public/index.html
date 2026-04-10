@@ -67,6 +67,25 @@
         margin-bottom: 14px;
       }
 
+      .assistant-picker {
+        margin: 0 0 14px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .assistant-btn {
+        background: rgba(255, 255, 255, 0.75);
+        color: var(--ink);
+        border: 1px solid var(--border);
+      }
+
+      .assistant-btn.active {
+        background: var(--accent-2);
+        color: #fff;
+        border-color: transparent;
+      }
+
       button {
         border: 0;
         border-radius: 999px;
@@ -98,10 +117,41 @@
         color: #fff;
       }
 
+      #testBtn {
+        background: var(--muted);
+        color: #fff;
+      }
+
       .status {
         margin: 0 0 14px;
         color: var(--muted);
         font-style: italic;
+      }
+
+      .composer {
+        margin: 0 0 14px;
+        display: flex;
+        gap: 8px;
+      }
+
+      #chatInput {
+        flex: 1;
+        min-width: 0;
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        padding: 10px 14px;
+        font: inherit;
+        color: var(--ink);
+        background: rgba(255, 255, 255, 0.95);
+      }
+
+      #chatInput:disabled {
+        opacity: 0.55;
+      }
+
+      #sendBtn {
+        background: #2f3d4a;
+        color: #fff;
       }
 
       .log {
@@ -172,6 +222,14 @@
         <div class="controls">
           <button id="startBtn">Start Lesson</button>
           <button id="stopBtn" disabled>End Lesson</button>
+          <button id="testBtn" disabled>Test Disconnect</button>
+        </div>
+
+        <div class="assistant-picker" id="assistantPicker"></div>
+
+        <div class="composer">
+          <input id="chatInput" type="text" placeholder="Write your message here..." disabled />
+          <button id="sendBtn" disabled>Send</button>
         </div>
 
         <p class="status" id="status">Idle.</p>
@@ -182,8 +240,23 @@
     <script>
       const startBtn = document.getElementById('startBtn');
       const stopBtn = document.getElementById('stopBtn');
+      const testBtn = document.getElementById('testBtn');
+      const sendBtn = document.getElementById('sendBtn');
+      const chatInput = document.getElementById('chatInput');
+      const assistantPicker = document.getElementById('assistantPicker');
       const statusEl = document.getElementById('status');
       const logEl = document.getElementById('log');
+
+      const ASSISTANTS = [
+        { id: 'professor', label: 'Il Professore' },
+        { id: 'interview_coach', label: 'Interview Coach' },
+        { id: 'study_tutor', label: 'Study Tutor' },
+        { id: 'audioguide', label: 'Audioguida' },
+        { id: 'immigration_assistant', label: 'Immigration Assistant' },
+        { id: 'language_tutor', label: 'Language Tutor' },
+      ];
+
+      let selectedAssistantId = ASSISTANTS[0].id;
 
       let ws = null;
       let stream = null;
@@ -199,19 +272,44 @@
       // quality degradation with the raw binary frame approach).
       const PLAYBACK_SAMPLE_RATE = 24000;
       const MIC_SAMPLE_RATE = 16000;
-      const INTERRUPT_THRESHOLD = 0.02;
+      const INTERRUPT_THRESHOLD = 0.035;
+      const INTERRUPT_CONSECUTIVE_FRAMES = 1;
 
       let playbackCtx = null;
       let nextPlaybackTime = 0;
       const activePlaybackSources = new Set();
+      const TRANSCRIPT_MERGE_WINDOW_MS = 1400;
+      let lastTranscriptEntry = null;
+      let consecutiveAboveThresholdFrames = 0;
 
       // ── Helpers ─────────────────────────────────────────────────────────────
 
-      function logLine(role, text) {
+      function mergeTranscriptText(previous, incoming) {
+        const prev = String(previous ?? '').trim();
+        const next = String(incoming ?? '').trim();
+        if (!prev) return next;
+        if (!next) return prev;
+
+        // When the model sends incremental hypotheses, prefer the longer update
+        // instead of blindly concatenating repeated prefixes.
+        if (next.startsWith(prev)) return next;
+        if (prev.startsWith(next)) return prev;
+
+        const maxOverlap = Math.min(prev.length, next.length);
+        for (let overlap = maxOverlap; overlap >= 1; overlap--) {
+          if (prev.slice(-overlap) === next.slice(0, overlap)) {
+            return `${prev}${next.slice(overlap)}`.trim();
+          }
+        }
+
+        return `${prev} ${next}`.replace(/\s+/g, ' ').trim();
+      }
+
+      function createTranscriptLine(role, text) {
         const p = document.createElement('p');
         p.className = `line ${role}`;
         if (role === 'user' || role === 'model') {
-          const label = role === 'user' ? 'You' : 'Il Professore';
+          const label = role === 'user' ? 'You' : 'Il professore';
           p.innerHTML = `<span class="role">${label}:</span> ${text}`;
         } else if (role === 'rag') {
           p.innerHTML = `<span class="badge">RAG TOOL CALLED</span>${text}`;
@@ -220,10 +318,78 @@
         }
         logEl.appendChild(p);
         logEl.scrollTop = logEl.scrollHeight;
+        return p;
+      }
+
+      function updateTranscriptLine(entry, text) {
+        if (!entry?.el) return;
+        const label = entry.role === 'user' ? 'You' : 'Il professore';
+        entry.el.innerHTML = `<span class="role">${label}:</span> ${text}`;
+      }
+
+      function logLine(role, text) {
+        if (role !== 'user' && role !== 'model') {
+          createTranscriptLine(role, text);
+          return;
+        }
+
+        const now = Date.now();
+        const normalizedText = String(text ?? '').trim();
+        if (!normalizedText) return;
+
+        if (
+          lastTranscriptEntry &&
+          lastTranscriptEntry.role === role &&
+          now - lastTranscriptEntry.at <= TRANSCRIPT_MERGE_WINDOW_MS
+        ) {
+          const merged = mergeTranscriptText(lastTranscriptEntry.text, normalizedText);
+          lastTranscriptEntry.text = merged;
+          lastTranscriptEntry.at = now;
+          updateTranscriptLine(lastTranscriptEntry, merged);
+          logEl.scrollTop = logEl.scrollHeight;
+          return;
+        }
+
+        const el = createTranscriptLine(role, normalizedText);
+        lastTranscriptEntry = { role, text: normalizedText, at: now, el };
       }
 
       function setStatus(text) {
         statusEl.textContent = text;
+      }
+
+      function setAssistantButtonsDisabled(disabled) {
+        const buttons = assistantPicker.querySelectorAll('button');
+        buttons.forEach((btn) => {
+          btn.disabled = disabled;
+        });
+      }
+
+      function getSelectedAssistantLabel() {
+        const assistant = ASSISTANTS.find((item) => item.id === selectedAssistantId);
+        return assistant ? assistant.label : 'Assistant';
+      }
+
+      function renderAssistantButtons() {
+        assistantPicker.innerHTML = '';
+        ASSISTANTS.forEach((assistant) => {
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = 'assistant-btn';
+          btn.textContent = assistant.label;
+          if (assistant.id === selectedAssistantId) {
+            btn.classList.add('active');
+          }
+
+          btn.addEventListener('click', () => {
+            if (ws) return;
+            selectedAssistantId = assistant.id;
+            renderAssistantButtons();
+            setStatus(`Assistant selected: ${assistant.label}`);
+          });
+
+          assistantPicker.appendChild(btn);
+        });
       }
 
       // Convert signed Int16 PCM samples to Float32 [-1, 1]
@@ -391,8 +557,27 @@
           for (let i = 0; i < input.length; i++) {
             sum += input[i] * input[i];
           }
-          if (Math.sqrt(sum / input.length) > INTERRUPT_THRESHOLD) {
+          const rms = Math.sqrt(sum / input.length);
+          if (rms > INTERRUPT_THRESHOLD) {
+            consecutiveAboveThresholdFrames += 1;
+          } else {
+            consecutiveAboveThresholdFrames = 0;
+          }
+
+          if (
+            consecutiveAboveThresholdFrames >= INTERRUPT_CONSECUTIVE_FRAMES &&
+            activePlaybackSources.size > 0
+          ) {
             stopAndClearPlayback();
+            logLine(
+              'system',
+              `Local interrupt (client RMS gate): rms=${rms.toFixed(3)} > ${INTERRUPT_THRESHOLD.toFixed(3)} for ${INTERRUPT_CONSECUTIVE_FRAMES} consecutive frames.`,
+            );
+            console.warn(
+              '[local-interrupt] client RMS gate triggered',
+              { rms, threshold: INTERRUPT_THRESHOLD, consecutiveFrames: INTERRUPT_CONSECUTIVE_FRAMES },
+            );
+            consecutiveAboveThresholdFrames = 0;
           }
 
           // Convert Float32 → Int16 PCM and send as JSON+base64.
@@ -414,6 +599,19 @@
 
       // ── WebSocket session ────────────────────────────────────────────────────
 
+      function sendTextPrompt() {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        const text = chatInput.value.trim();
+        if (!text) return;
+
+        // Typed messages should barge-in exactly like VAD speech input.
+        // Stop any currently playing bot audio before submitting the new turn.
+        stopAndClearPlayback();
+
+        ws.send(JSON.stringify({ type: 'text_prompt', text }));
+        chatInput.value = '';
+      }
+
       async function startSession() {
         if (ws) return;
 
@@ -429,10 +627,14 @@
         ws.onopen = async () => {
           try {
             await startMicCapture();
-            ws.send(JSON.stringify({ type: 'start_session' }));
+            ws.send(JSON.stringify({ type: 'start_session', assistantId: selectedAssistantId }));
             stopBtn.disabled = false;
-            setStatus('Connecting to Il Professore...');
-            logLine('system', 'Microphone ready. Waiting for Il Professore...');
+            testBtn.disabled = false;
+            sendBtn.disabled = false;
+            chatInput.disabled = false;
+            setAssistantButtonsDisabled(true);
+            setStatus(`Connecting to ${getSelectedAssistantLabel()}...`);
+            logLine('system', `Microphone ready. Waiting for ${getSelectedAssistantLabel()}...`);
           } catch (err) {
             logLine('system', `Microphone error: ${err instanceof Error ? err.message : String(err)}`);
             stopSession();
@@ -485,6 +687,30 @@
             logLine('rag', details);
           }
 
+          if (msg.type === 'session_cost_summary') {
+            const inputTokens = Number(msg.inputTokens ?? 0).toLocaleString();
+            const outputTokens = Number(msg.outputTokens ?? 0).toLocaleString();
+            const ragTokens = Number(msg.ragTokens ?? 0).toLocaleString();
+            const hasPricing = Boolean(msg.pricingConfigured);
+            const inputCost = hasPricing ? `$${Number(msg.inputCostUsd ?? 0).toFixed(6)}` : 'N/A';
+            const outputCost = hasPricing ? `$${Number(msg.outputCostUsd ?? 0).toFixed(6)}` : 'N/A';
+            const ragCost = hasPricing ? `~$${Number(msg.ragCostUsd ?? 0).toFixed(6)}` : 'N/A';
+            const totalCost = hasPricing ? `$${Number(msg.estimatedCostUsd ?? 0).toFixed(6)}` : 'N/A';
+
+            logLine(
+              'system',
+              `SESSION COST SUMMARY | Input Tokens: ${inputTokens} (${inputCost}) | ` +
+                `Output Tokens: ${outputTokens} (${outputCost}) | ` +
+                `RAG Tokens: ${ragTokens} (${ragCost}, subset of input) | ` +
+                `Estimated Cost: ${totalCost}`,
+            );
+            if (hasPricing) {
+              setStatus(`Session cost estimated: ${totalCost}`);
+            } else {
+              setStatus('Session ended. Pricing not configured in server env.');
+            }
+          }
+
           // ── Gemini audio output ──────────────────────────────────────────
           // The server sends { type: 'tts_audio', data: '<base64>' }.
           // The base64 payload is raw Int16 PCM at 24kHz mono.
@@ -506,6 +732,10 @@
           ws = null;
           startBtn.disabled = false;
           stopBtn.disabled = true;
+          testBtn.disabled = true;
+          sendBtn.disabled = true;
+          chatInput.disabled = true;
+          setAssistantButtonsDisabled(false);
           setStatus('Disconnected.');
           logLine('system', 'Session ended.');
         };
@@ -526,6 +756,20 @@
 
       startBtn.addEventListener('click', () => { void startSession(); });
       stopBtn.addEventListener('click', () => { stopSession(); });
+      testBtn.addEventListener('click', () => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'simulate_disconnect' }));
+        }
+      });
+      sendBtn.addEventListener('click', () => { sendTextPrompt(); });
+      chatInput.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          sendTextPrompt();
+        }
+      });
+
+      renderAssistantButtons();
     </script>
   </body>
 </html>

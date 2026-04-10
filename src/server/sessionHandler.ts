@@ -8,6 +8,7 @@
 //   Browser → Server  { type: 'start_session' }
 //   Browser → Server  { type: 'end_session' }
 //   Browser → Server  { type: 'audio_chunk', data: string }   ← base64 Int16 PCM, 16kHz mono
+//   Browser → Server  { type: 'text_prompt', text: string }
 //   Server  → Browser { type: 'transcript', role: 'user'|'model', text: string }
 //   Server  → Browser { type: 'status',     message: string }
 //   Server  → Browser { type: 'error',      message: string }
@@ -15,7 +16,26 @@
 
 import { WebSocket, type RawData } from 'ws';
 import { createProfessorAgent, type ProfessorAgent } from '../agent/professorFactory.js';
+import {
+  DEFAULT_ASSISTANT_ID,
+  getAssistantInstructions,
+  isAssistantId,
+  type AssistantId,
+} from '../config/professorConfig.js';
 import { browserRagService } from './ragService.js';
+import { SessionCostTracker } from './sessionCostTracker.js';
+
+// How long to wait before attempting a reconnect after Google drops the line.
+// Keep this short (1-2 s) so the user barely notices the gap.
+const RECONNECT_DELAY_MS = 1500;
+
+// Maximum number of consecutive reconnect attempts before giving up and
+// reporting an error to the browser. Prevents infinite loops on hard failures.
+const MAX_RECONNECT_ATTEMPTS = 5;
+
+// Resumption tokens are valid for 2 hours after the last session termination
+// (per Google docs), but we never need to hold them longer than the lifetime
+// of this SessionHandler, so no expiry logic is required here.
 
 export class SessionHandler {
   private ws: WebSocket;
@@ -24,6 +44,23 @@ export class SessionHandler {
   private isStarting = false;
   private pendingMicByte: Buffer | null = null;
   private pendingTtsByte: Buffer | null = null;
+  private pendingTextPrompts: string[] = [];
+  private costTracker = new SessionCostTracker();
+  private sessionCostSummarySent = false;
+  private selectedAssistantId: AssistantId = DEFAULT_ASSISTANT_ID;
+
+  // ── Session Resumption state ─────────────────────────────────────────────
+  // Google sends sessionResumptionUpdate messages throughout the session.
+  // We keep the latest resumable handle so we can pass it on reconnect.
+  private resumptionHandle: string | null = null;
+  private reconnectAttempts = 0;
+  private isReconnecting = false;
+  // When true, a deliberate end_session was requested — don't auto-reconnect.
+  private intentionalClose = false;
+
+  // ── Raw Gemini WebSocket plumbing ────────────────────────────────────────
+  // We attach one message listener to the underlying Gemini WS to capture
+  // resumption handles and goAway signals before Mastra processes them.
   private geminiWs: WebSocket | null = null;
   private geminiWsMessageListener: ((data: RawData) => void) | null = null;
 
@@ -40,13 +77,11 @@ export class SessionHandler {
     this.ws.on('message', (data: RawData) => {
       const normalized = this.normalizeIncomingMessage(data);
 
-      // All messages are JSON text frames — audio_chunk carries base64 payload
       if (typeof normalized === 'string') {
         this.handleControlMessage(normalized);
         return;
       }
 
-      // Some ws clients deliver text frames as Buffer, so decode and parse JSON.
       const asString = normalized.toString();
       if (asString[0] === '{') {
         this.handleControlMessage(asString);
@@ -54,12 +89,14 @@ export class SessionHandler {
     });
 
     this.ws.on('close', () => {
-      console.log(`[${this.sessionId}] WebSocket closed — cleaning up`);
+      console.log(`[${this.sessionId}] Browser WebSocket closed — cleaning up`);
+      this.intentionalClose = true;
       this.cleanup();
     });
 
     this.ws.on('error', (err) => {
-      console.error(`[${this.sessionId}] WebSocket error:`, err.message);
+      console.error(`[${this.sessionId}] Browser WebSocket error:`, err.message);
+      this.intentionalClose = true;
       this.cleanup();
     });
   }
@@ -74,7 +111,7 @@ export class SessionHandler {
   // ─── Control Messages ───────────────────────────────────────────────────────
 
   private async handleControlMessage(raw: string) {
-    let msg: { type: string; data?: string };
+    let msg: { type: string; data?: string; text?: string; assistantId?: string };
     try {
       msg = JSON.parse(raw);
     } catch {
@@ -84,19 +121,30 @@ export class SessionHandler {
 
     switch (msg.type) {
       case 'start_session':
+        this.selectedAssistantId = this.resolveAssistantId(msg.assistantId);
         await this.startSession();
         break;
       case 'end_session':
+        this.intentionalClose = true;
         await this.cleanup();
         break;
+      case 'simulate_disconnect':
+        if (this.geminiWs) {
+          console.log(`[${this.sessionId}] Simulating Google disconnect...`);
+          // Forcefully emit an error and terminate to trigger the reconnect logic
+          this.geminiWs.emit('error', new Error('Simulated Google WebSocket closure'));
+          this.geminiWs.terminate();
+        }
+        break;
       case 'audio_chunk':
-        // Browser sends mic audio as base64-encoded Int16 PCM (16kHz mono)
         if (!msg.data || !this.professor) break;
+        // Don't forward audio while we're in the middle of a reconnect —
+        // the Gemini socket isn't open yet and send() would throw.
+        if (this.isReconnecting) break;
 
         {
           let decoded = Buffer.from(msg.data, 'base64');
 
-          // Preserve alignment across chunk boundaries to avoid dropping bytes.
           if (this.pendingMicByte) {
             decoded = Buffer.concat([this.pendingMicByte, decoded]);
             this.pendingMicByte = null;
@@ -121,6 +169,28 @@ export class SessionHandler {
           }
         }
         break;
+      case 'text_prompt': {
+        const text = String(msg.text ?? '').trim();
+        if (!text) break;
+
+        // Mirror typed input immediately in the UI transcript.
+        this.sendJSON({ type: 'transcript', role: 'user', text });
+
+        if (this.isReconnecting || !this.professor) {
+          this.pendingTextPrompts.push(text);
+          this.sendStatus('Messaggio testuale accodato: verra inviato appena la connessione e pronta.');
+          break;
+        }
+
+        const sent = this.sendRealtimeText(this.professor.voice, text);
+        if (!sent) {
+          this.pendingTextPrompts.push(text);
+          if (!this.intentionalClose) {
+            this.scheduleReconnect();
+          }
+        }
+        break;
+      }
       default:
         console.warn(`[${this.sessionId}] Unknown message type: ${msg.type}`);
     }
@@ -134,23 +204,64 @@ export class SessionHandler {
       return;
     }
 
+    this.intentionalClose = false;
+    this.reconnectAttempts = 0;
+    this.costTracker.reset();
+    this.sessionCostSummarySent = false;
+    await this.connectToGemini(false);
+  }
+
+  /**
+   * Core connection method, used for both fresh starts and silent reconnects.
+   *
+   * @param isReconnect  When true, we pass the resumption handle to Google
+   *                     so it restores the conversation state, and we skip
+   *                     the opening greeting (Gemini already knows the context).
+   */
+  private async connectToGemini(isReconnect: boolean) {
+    if (this.isStarting) return;
     this.isStarting = true;
 
     let createdProfessor: ProfessorAgent | null = null;
 
     try {
-      this.sendStatus('Connecting to MemorAIz Assistant...');
+      if (!isReconnect) {
+        this.sendStatus(`Connecting to ${this.getAssistantLabel(this.selectedAssistantId)}...`);
+        void browserRagService.ensureReady().catch((err) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(`[${this.sessionId}] RAG warmup failed:`, msg);
+        });
+      }
 
-      void browserRagService.ensureReady().catch((err) => {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.warn(`[${this.sessionId}] RAG warmup failed:`, msg);
+      const instructions = getAssistantInstructions(this.selectedAssistantId);
+      createdProfessor = createProfessorAgent({
+        instructions,
+        name: this.getAssistantLabel(this.selectedAssistantId),
       });
-
-      // Create a fresh, isolated agent for this user
-      createdProfessor = createProfessorAgent();
       const { voice } = createdProfessor;
 
-      // ── Listen for audio coming BACK from Gemini → forward to browser ──────
+      const reconnectWithHandle = isReconnect && !!this.resumptionHandle;
+
+      // ── If reconnecting, inject the resumption handle into the setup ──────
+      // GeminiLiveVoice doesn't have a first-class API for this, so we patch
+      // the setup event exactly like we do for audio responses in the factory.
+      if (reconnectWithHandle && this.resumptionHandle) {
+        const handle = this.resumptionHandle;
+        const anyVoice = voice as any;
+        if (typeof anyVoice.sendEvent === 'function') {
+          const originalSendEvent = anyVoice.sendEvent.bind(anyVoice);
+          anyVoice.sendEvent = (type: string, data: any) => {
+            if (type === 'setup' && data?.setup) {
+              // Tell Google: "resume from this handle"
+              this.withSessionResumption(data, handle);
+              console.log(`[${this.sessionId}] Reconnect: injecting resumption handle ${handle.slice(0, 12)}...`);
+            }
+            return originalSendEvent(type, data);
+          };
+        }
+      }
+
+      // ── Audio from Gemini → Browser ────────────────────────────────────────
       voice.on('speaker', (audioStream: NodeJS.ReadableStream) => {
         audioStream.on('data', (chunk: Buffer | Uint8Array | string) => {
           if (this.ws.readyState !== WebSocket.OPEN) return;
@@ -162,7 +273,6 @@ export class SessionHandler {
                 ? chunk
                 : Buffer.from(chunk);
 
-          // Preserve alignment across chunk boundaries to avoid dropping bytes.
           if (this.pendingTtsByte) {
             buf = Buffer.concat([this.pendingTtsByte, buf]);
             this.pendingTtsByte = null;
@@ -175,8 +285,6 @@ export class SessionHandler {
 
           if (buf.byteLength === 0) return;
 
-          // Send as JSON+base64 so the browser decodes at the correct
-          // 24kHz sample rate with no format ambiguity
           this.sendJSON({ type: 'tts_audio', data: buf.toString('base64') });
         });
 
@@ -189,7 +297,7 @@ export class SessionHandler {
         });
       });
 
-      // ── Listen for transcriptions (both user and model text) ───────────────
+      // ── Transcripts ────────────────────────────────────────────────────────
       voice.on('writing', ({ text, role }: { text: string; role: string }) => {
         this.sendJSON({ type: 'transcript', role, text });
         console.log(`[${this.sessionId}] ${role}: ${text}`);
@@ -199,56 +307,123 @@ export class SessionHandler {
         console.log(`[${this.sessionId}] Tool call: ${name} (id=${id})`, args);
       });
 
-      // ── Forward any errors to the browser ─────────────────────────────────
+      // ── Voice errors → try to reconnect ────────────────────────────────────
+      // This fires when the Gemini WebSocket is closed by Google (e.g. the
+      // ~10-minute connection limit). We attempt a silent reconnect unless
+      // the user explicitly ended the session.
       voice.on('error', (err: { message: string; code?: string; details?: unknown }) => {
-        console.error(`[${this.sessionId}] Voice error:`, err);
-        this.sendJSON({ type: 'error', message: err.message });
+        console.warn(`[${this.sessionId}] Voice error (will attempt reconnect):`, err.message);
+        if (!this.intentionalClose) {
+          this.scheduleReconnect();
+        }
       });
 
       this.attachRagTool(voice);
 
-      // Establish the WebSocket to Google Live API
+      // ── Connect ────────────────────────────────────────────────────────────
       await voice.connect();
 
-      this.attachGeminiInterruptLogger(voice);
+      // ── Capture resumption handles from raw Gemini messages ───────────────
+      this.attachGeminiMessageSpy(voice);
 
-      // Mark session as active only after the voice connection is established.
+      // Swap in the new professor atomically
+      const oldProfessor = this.professor;
       this.professor = createdProfessor;
+      createdProfessor = null; // prevent cleanup in finally block
 
-      this.sendStatus('Connected! MemorAIz Assistant is ready.');
+      if (oldProfessor) {
+        // Destroy the old voice instance quietly — its WS is already dead
+        oldProfessor.destroy().catch(() => {});
+      }
 
-      // ── Gemini 3.1: trigger the model to speak first ───────────────────────
-      // Gemini 3.1 rejects `client_content` (used by voice.speak()) mid-session.
-      // The correct approach is `realtimeInput` with a `text` field, sent raw
-      // over the underlying WebSocket that Mastra exposes via connectionManager.
-      this.geminiSpeakFirst(
-        voice,
-        `Sei l'assistente di MemorAIz. ` +
-          `Presentati, poi chiedi all'utente come puoi aiutarlo oggi. ` +
-          `Quando la richiesta riguarda documenti, usa il tool search_documents prima di rispondere.`,
-      );
+      this.reconnectAttempts = 0;
+      this.isReconnecting = false;
+
+      this.flushPendingTextPrompts(voice);
+
+      if (!isReconnect) {
+        this.sendStatus(`Connected! ${this.getAssistantLabel(this.selectedAssistantId)} is ready.`);
+        // Fresh session: send the opening prompt
+        this.geminiSpeakFirst(
+          voice,
+          `Sei l'assistente di MemorAIz. ` +
+            `Presentati.` +
+            `Quando la richiesta riguarda documenti, usa il tool search_documents prima di rispondere.`,
+        );
+      } else {
+        if (reconnectWithHandle) {
+          // Reconnected: Gemini has context from the resumption handle.
+          this.sendStatus('Connessione ripristinata.');
+          console.log(`[${this.sessionId}] Session resumed transparently (attempt ${this.reconnectAttempts + 1})`);
+        } else {
+          // Fallback path: we restored transport but not conversation state.
+          this.sendStatus('Connessione ripristinata, ma il contesto precedente non e stato recuperato.');
+          console.warn(`[${this.sessionId}] Reconnected without resumption handle: context continuity not guaranteed.`);
+        }
+      }
 
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      console.error(`[${this.sessionId}] Failed to start session:`, message);
-      this.sendStatus(`Connection failed: ${message}`);
-      this.sendJSON({ type: 'error', message: `Failed to connect: ${message}` });
-      this.professor = null;
+      console.error(`[${this.sessionId}] Failed to connect (reconnect=${isReconnect}):`, message);
+
       if (createdProfessor) {
         await createdProfessor.destroy();
+      }
+
+      if (isReconnect && !this.intentionalClose) {
+        // Connection attempt itself failed — try again
+        this.scheduleReconnect();
+      } else if (!isReconnect) {
+        this.sendStatus(`Connection failed: ${message}`);
+        this.sendJSON({ type: 'error', message: `Failed to connect: ${message}` });
+        this.professor = null;
       }
     } finally {
       this.isStarting = false;
     }
   }
 
-  // ─── Gemini 3.1 "speak first" ───────────────────────────────────────────────
+  // ─── Reconnect Logic ────────────────────────────────────────────────────────
+
+  private scheduleReconnect() {
+    if (this.intentionalClose || this.isReconnecting) return;
+
+    this.reconnectAttempts++;
+
+    if (this.reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
+      console.error(`[${this.sessionId}] Max reconnect attempts (${MAX_RECONNECT_ATTEMPTS}) reached. Giving up.`);
+      this.sendJSON({ type: 'error', message: 'Impossibile ripristinare la connessione. Ricarica la pagina.' });
+      this.cleanup();
+      return;
+    }
+
+    this.isReconnecting = true;
+    console.log(`[${this.sessionId}] Scheduling reconnect attempt ${this.reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS} in ${RECONNECT_DELAY_MS}ms`);
+    this.sendStatus('Riconnessione in corso...');
+
+    setTimeout(() => {
+      if (this.intentionalClose) {
+        this.isReconnecting = false;
+        return;
+      }
+      this.connectToGemini(true).catch((err) => {
+        console.error(`[${this.sessionId}] Reconnect error:`, err);
+      });
+    }, RECONNECT_DELAY_MS);
+  }
+
+  // ─── Raw Gemini WebSocket message spy ───────────────────────────────────────
   //
-  // voice.speak() sends `client_content`, which Gemini 3.1 rejects with 1007.
-  // Instead we send `realtimeInput: { text }` directly on the raw WebSocket.
-  // Mastra keeps the underlying WS on voice.connectionManager (accessible via
-  // getWebSocket()), which we reach through the `any` cast.
+  // We attach a listener to the underlying Gemini WebSocket to intercept two
+  // message types that Mastra doesn't surface:
   //
+  //   sessionResumptionUpdate  → contains the latest resumption handle; we
+  //                              store it so we can pass it on reconnect.
+  //
+  //   goAway                   → Google signals it will close the connection
+  //                              soon; we use this to log a warning and
+  //                              pre-emptively prepare for the reconnect.
+
   private getGeminiWebSocket(voice: any): WebSocket | undefined {
     return (
       voice?.connectionManager?.getWebSocket?.() ??
@@ -257,14 +432,14 @@ export class SessionHandler {
     );
   }
 
-  private attachGeminiInterruptLogger(voice: any) {
+  private attachGeminiMessageSpy(voice: any) {
     const geminiWs = this.getGeminiWebSocket(voice);
     if (!geminiWs) {
-      console.warn(`[${this.sessionId}] VAD/interrupt logger: could not find Gemini WebSocket`);
+      console.warn(`[${this.sessionId}] Message spy: could not find Gemini WebSocket`);
       return;
     }
 
-    // Ensure we never stack duplicate listeners on reconnects.
+    // Remove any listener from a previous connection to avoid stacking.
     if (this.geminiWs && this.geminiWsMessageListener) {
       this.geminiWs.off('message', this.geminiWsMessageListener);
     }
@@ -275,121 +450,246 @@ export class SessionHandler {
       try {
         const payload = this.normalizeIncomingMessage(raw);
         const asString = typeof payload === 'string' ? payload : payload.toString();
-        const data = JSON.parse(asString) as {
-          serverContent?: {
-            interrupted?: boolean;
-          };
-        };
+        const data = JSON.parse(asString) as any;
 
-        if (data.serverContent?.interrupted === true) {
-          const ts = new Date().toISOString();
-          console.warn(`[${this.sessionId}] [${ts}] VAD interruption detected (serverContent.interrupted=true)`);
+        this.costTracker.captureUsageMetadata(data);
+        this.mirrorAutomaticTranscriptions(data);
+
+        // ── Capture resumption handle ──────────────────────────────────────
+        // Google sends this periodically throughout the session and on every
+        // turn completion. We always keep the latest one.
+        const update =
+          data?.sessionResumptionUpdate ??
+          data?.session_resumption_update ??
+          data?.sessionResumption?.update ??
+          data?.session_resumption?.update;
+        if (update) {
+          const newHandle = update.handle ?? update.new_handle ?? update.newHandle;
+          const resumable = update.resumable ?? true;
+          if (newHandle && resumable) {
+            this.resumptionHandle = newHandle;
+            // Uncomment for verbose debugging:
+            // console.log(`[${this.sessionId}] Resumption handle updated: ${newHandle.slice(0, 12)}...`);
+          }
         }
+
+        // Some SDK responses expose the active handle directly in setup/session.
+        const directHandle =
+          data?.setup?.sessionHandle ??
+          data?.setup?.session_handle ??
+          data?.sessionHandle ??
+          data?.session_handle;
+        if (directHandle && !this.resumptionHandle) {
+          this.resumptionHandle = directHandle;
+        }
+
+        // ── Log goAway ─────────────────────────────────────────────────────
+        // Google sends this a few seconds before forcefully closing the WS.
+        // We don't need to act here — the voice 'error' event will fire when
+        // the connection actually drops and trigger scheduleReconnect().
+        if (data?.goAway || data?.go_away) {
+          const timeLeft = data?.goAway?.timeLeft ?? data?.go_away?.time_left ?? 'unknown';
+          console.warn(`[${this.sessionId}] goAway received — connection closing in ${timeLeft}s. Handle ready: ${!!this.resumptionHandle}`);
+        }
+
+        // ── Log VAD interruptions ──────────────────────────────────────────
+        if (data?.serverContent?.interrupted === true) {
+          console.warn(`[${this.sessionId}] VAD interruption detected`);
+        }
+
       } catch {
-        // Ignore non-JSON frames and parse errors; this listener is best-effort diagnostics only.
+        // Ignore non-JSON frames — this listener is best-effort
       }
     };
 
     geminiWs.on('message', this.geminiWsMessageListener);
   }
 
+  // ─── Gemini "speak first" ────────────────────────────────────────────────────
+
   private geminiSpeakFirst(voice: any, text: string) {
-    try {
-      const geminiWs = this.getGeminiWebSocket(voice);
-
-      if (!geminiWs) {
-        console.warn(`[${this.sessionId}] geminiSpeakFirst: could not find underlying WebSocket`);
-        return;
-      }
-
-      if (geminiWs.readyState !== WebSocket.OPEN) {
-        console.warn(`[${this.sessionId}] geminiSpeakFirst: WebSocket not open (state=${geminiWs.readyState})`);
-        return;
-      }
-
-      const message = JSON.stringify({ realtimeInput: { text } });
-      geminiWs.send(message);
-      console.log(`[${this.sessionId}] geminiSpeakFirst: sent realtimeInput text → "${text}"`);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[${this.sessionId}] geminiSpeakFirst failed:`, msg);
+    const sent = this.sendRealtimeText(voice, text);
+    if (!sent) {
+      console.warn(`[${this.sessionId}] geminiSpeakFirst: WebSocket not ready`);
     }
   }
 
+  private sendRealtimeText(voice: any, text: string): boolean {
+    try {
+      const geminiWs = this.getGeminiWebSocket(voice);
+      if (!geminiWs || geminiWs.readyState !== WebSocket.OPEN) {
+        return false;
+      }
+      geminiWs.send(JSON.stringify({ realtimeInput: { text } }));
+      return true;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[${this.sessionId}] sendRealtimeText failed:`, msg);
+      return false;
+    }
+  }
+
+  private flushPendingTextPrompts(voice: any) {
+    if (this.pendingTextPrompts.length === 0) return;
+
+    const queued = [...this.pendingTextPrompts];
+    this.pendingTextPrompts = [];
+
+    for (let i = 0; i < queued.length; i++) {
+      const sent = this.sendRealtimeText(voice, queued[i]);
+      if (!sent) {
+        this.pendingTextPrompts = queued.slice(i);
+        break;
+      }
+    }
+  }
+
+  private extractTranscriptionText(payload: any): string {
+    if (!payload) return '';
+    if (typeof payload === 'string') return payload.trim();
+
+    if (typeof payload.text === 'string') {
+      return payload.text.trim();
+    }
+
+    const candidates = [
+      payload.transcript,
+      payload.transcribedText,
+      payload.transcribed_text,
+      payload.partialText,
+      payload.partial_text,
+      payload.finalText,
+      payload.final_text,
+      payload.caption,
+      payload.content,
+    ];
+
+    for (const value of candidates) {
+      if (typeof value === 'string' && value.trim().length > 0) {
+        return value.trim();
+      }
+    }
+
+    return '';
+  }
+
+  private emitTranscriptFromPayload(role: 'user' | 'model', payload: any) {
+    const text = this.extractTranscriptionText(payload);
+    if (!text) return;
+
+    this.sendJSON({ type: 'transcript', role, text });
+    console.log(`[${this.sessionId}] ${role} (transcription): ${text}`);
+  }
+
+  private mirrorAutomaticTranscriptions(data: any) {
+    const userPayload =
+      data?.inputTranscription ??
+      data?.input_transcription ??
+      data?.serverContent?.inputTranscription ??
+      data?.serverContent?.input_transcription ??
+      data?.server_content?.input_transcription;
+
+    const modelPayload =
+      data?.outputTranscription ??
+      data?.output_transcription ??
+      data?.serverContent?.outputTranscription ??
+      data?.serverContent?.output_transcription ??
+      data?.server_content?.output_transcription;
+
+    this.emitTranscriptFromPayload('user', userPayload);
+    this.emitTranscriptFromPayload('model', modelPayload);
+  }
+
+  private withSessionResumption(data: any, handle: string) {
+    if (!data?.setup) return;
+
+    // Keep both variants for compatibility with SDK/API field naming.
+    data.setup.session_resumption = { handle };
+    data.setup.sessionResumption = { handle };
+  }
+
+  // ─── RAG Tool ────────────────────────────────────────────────────────────────
+
   private attachRagTool(voice: any) {
-    voice.addTools({ // addTools is a method provided by the GeminiLiveVoice instance that allows us to define custom tools that the language model can call during its execution.
-      // we are saying to gemini that if he needs to search for information in the indexed PDF documents (e.g. the user has asked a question that requires information retrieval),
-      // he can call the tool named "search_documents" and provide a query string as input. Calling this tool concretely means that gemini will return to our server a response indicating that the tool was called, along with the query, and then our server will execute the provided function to perform the search in the RAG system and return the results back to Gemini, which can then use that information to generate a more informed response to the user.
-      // Our server will understand that gemini has called the tool because of the "toolCall" event listener we set up on the voice instance, which will log the tool call and its arguments. The actual execution of the search_documents tool is defined in the execute function, where we take the query input, perform the search using our browserRagService, and return the relevant context and sources back to Gemini.
+    voice.addTools({
       search_documents: {
         description: 'Cerca informazioni nei PDF locali indicizzati dal server.',
         parameters: {
-              type: 'object',
-              properties: {
-                query: {
-                  type: 'string',
-                  description: 'Query breve e precisa per cercare nei documenti.',
-                },
-              },
-              required: ['query'],
+          type: 'object',
+          properties: {
+            query: {
+              type: 'string',
+              description: 'Query breve e precisa per cercare nei documenti.',
+            },
+          },
+          required: ['query'],
         },
         execute: async (input: { query?: string }) => {
-          // this is the definition of what OUR SERVER does when Gemini calls the "search_documents" tool. We take the input query, validate it, and then use our browserRagService to search for relevant context in the indexed PDF documents. We then return an object containing the relevant context, the list of source file names, and the scores for each source back to Gemini.
-                  const query = String(input?.query ?? '').trim();
-                  if (!query) {
-                    return {
-                      result: 'Errore: query vuota.',
-                      sources: [],
-                    };
-                  }
+          const query = String(input?.query ?? '').trim();
+          if (!query) {
+            return { result: 'Errore: query vuota.', sources: [] };
+          }
 
-                  this.sendStatus(`RAG: ricerca nei documenti per "${query}"`);
+          this.sendStatus(`RAG: ricerca nei documenti per "${query}"`);
 
-                  const { relevantContext, sources, scoredSources } = await browserRagService.queryRelevantContext(query, 5);
+          const { relevantContext, sources, scoredSources } = await browserRagService.queryRelevantContext(query, 5);
 
-                  this.sendJSON({ // we send a JSON message back to the browser with the type 'rag_tool_called', including the original query, the list of source file names, and the scores for each source
-                    type: 'rag_tool_called',
-                    query,
-                    sources,
-                    scores: scoredSources.map((s) => ({ file: s.file, score: s.score })),
-                  });
+          this.sendJSON({
+            type: 'rag_tool_called',
+            query,
+            sources,
+            scores: scoredSources.map((s) => ({ file: s.file, score: s.score })),
+          });
 
-                  if (!relevantContext) {
-                    if (sources.length > 0) {
-                      this.sendStatus(`RAG: trovate fonti, ma poco contesto testuale (${sources.join(', ')}).`);
-                      return {
-                        result: `Documenti trovati: ${sources.join(', ')}.`,
-                        sources,
-                        scores: scoredSources.map((s) => ({ file: s.file, score: s.score })),
-                      };
-                    }
+          let toolResult: {
+            result: string;
+            sources: string[];
+            scores: Array<{ file: string; score: number }>;
+          };
 
-                    this.sendStatus('RAG: nessuna corrispondenza trovata.');
-                    return {
-                      result: 'Nessuna corrispondenza nei documenti caricati.',
-                      sources,
-                      scores: scoredSources.map((s) => ({ file: s.file, score: s.score })),
-                    };
-                  }
+          if (!relevantContext) {
+            if (sources.length > 0) {
+              this.sendStatus(`RAG: trovate fonti, ma poco contesto testuale (${sources.join(', ')}).`);
+              toolResult = {
+                result: `Documenti trovati: ${sources.join(', ')}.`,
+                sources,
+                scores: scoredSources.map((s) => ({ file: s.file, score: s.score })),
+              };
+              this.costTracker.recordRagUsage(toolResult);
+              return toolResult;
+            }
+            this.sendStatus('RAG: nessuna corrispondenza trovata.');
+            toolResult = {
+              result: 'Nessuna corrispondenza nei documenti caricati.',
+              sources,
+              scores: scoredSources.map((s) => ({ file: s.file, score: s.score })),
+            };
+            this.costTracker.recordRagUsage(toolResult);
+            return toolResult;
+          }
 
-                  this.sendStatus(`RAG: trovate ${sources.length || 1} fonti rilevanti.`);
-
-                  return {
-                    result: relevantContext,
-                    sources,
-                    scores: scoredSources.map((s) => ({ file: s.file, score: s.score })),
-                  };
-                  // what we put in the return object of the execute function is what gets sent back to Gemini as the output of the tool call. Gemini can then use this information in its response generation, for example by including the relevant context in its answer to the user's question. The sources and scores can also be used for attribution or for deciding how much weight to give to the retrieved context in generating the response.
+          this.sendStatus(`RAG: trovate ${sources.length || 1} fonti rilevanti.`);
+          toolResult = {
+            result: relevantContext,
+            sources,
+            scores: scoredSources.map((s) => ({ file: s.file, score: s.score })),
+          };
+          this.costTracker.recordRagUsage(toolResult);
+          return toolResult;
         },
       },
     });
   }
 
-  // ─── Cleanup ────────────────────────────────────────────────────────────────
+  // ─── Cleanup ─────────────────────────────────────────────────────────────────
 
   private async cleanup() {
+    this.emitSessionCostSummary();
+
     this.pendingMicByte = null;
     this.pendingTtsByte = null;
+    this.pendingTextPrompts = [];
+    this.isReconnecting = false;
 
     if (this.geminiWs && this.geminiWsMessageListener) {
       this.geminiWs.off('message', this.geminiWsMessageListener);
@@ -404,7 +704,55 @@ export class SessionHandler {
     }
   }
 
-  // ─── Helpers ────────────────────────────────────────────────────────────────
+  private emitSessionCostSummary() {
+    if (this.sessionCostSummarySent) return;
+    this.sessionCostSummarySent = true;
+
+    const { summary, sessionMinutes, pricing } = this.costTracker.getSummary();
+
+    console.log(`[${this.sessionId}] SESSION COST SUMMARY`);
+    if (!summary.pricingConfigured) {
+      console.warn(
+        `[${this.sessionId}] Pricing env missing. Set GOOGLE_PRICE_TEXT_INPUT_PER_1M, GOOGLE_PRICE_TEXT_OUTPUT_PER_1M, GOOGLE_PRICE_AUDIO_INPUT_PER_1M, GOOGLE_PRICE_AUDIO_OUTPUT_PER_1M for USD totals.`,
+      );
+    }
+    console.log(
+      `[${this.sessionId}] Input Tokens: ${summary.inputTokens.toLocaleString()} (${summary.inputCostUsd === null ? 'N/A' : `$${summary.inputCostUsd.toFixed(6)}`}) ` +
+        `[text=${summary.inputTextTokens.toLocaleString()}, audio=${summary.inputAudioTokens.toLocaleString()}]`,
+    );
+    console.log(
+      `[${this.sessionId}] Output Tokens: ${summary.outputTokens.toLocaleString()} (${summary.outputCostUsd === null ? 'N/A' : `$${summary.outputCostUsd.toFixed(6)}`}) ` +
+        `[text=${summary.outputTextTokens.toLocaleString()}, audio=${summary.outputAudioTokens.toLocaleString()}]`,
+    );
+    console.log(
+      `[${this.sessionId}] RAG Tokens (subset of input): ${summary.ragTokens.toLocaleString()} (${summary.ragCostUsd === null ? 'N/A' : `~$${summary.ragCostUsd.toFixed(6)}`}) ` +
+        `[calls=${summary.ragCalls}]`,
+    );
+    console.log(
+      `[${this.sessionId}] Growth: ${summary.growth.shape} ` +
+        `(delta input first=${Math.round(summary.growth.firstDeltaInput).toLocaleString()}, ` +
+        `last=${Math.round(summary.growth.lastDeltaInput).toLocaleString()}, ` +
+        `avg=${Math.round(summary.growth.avgDeltaInput).toLocaleString()}, ` +
+        `slope/turn=${summary.growth.deltaSlopePerTurn.toFixed(2)})`,
+    );
+    console.log(
+      `[${this.sessionId}] Estimated Cost: ${summary.estimatedCostUsd === null ? 'N/A' : `$${summary.estimatedCostUsd.toFixed(6)}`} ` +
+        `(duration ${sessionMinutes.toFixed(2)} min, usage events ${summary.usageEvents})`,
+    );
+
+    this.sendJSON({
+      type: 'session_cost_summary',
+      ...summary,
+      sessionMinutes,
+      pricing,
+      notes: [
+        'RAG tokens are an estimate and are already part of input context charges.',
+        'Set GOOGLE_PRICE_*_PER_1M in .env for accurate USD totals.',
+      ],
+    });
+  }
+
+  // ─── Helpers ─────────────────────────────────────────────────────────────────
 
   private sendJSON(obj: object) {
     if (this.ws.readyState === WebSocket.OPEN) {
@@ -414,5 +762,29 @@ export class SessionHandler {
 
   private sendStatus(message: string) {
     this.sendJSON({ type: 'status', message });
+  }
+
+  private resolveAssistantId(rawAssistantId?: string): AssistantId {
+    if (isAssistantId(rawAssistantId)) return rawAssistantId;
+    return DEFAULT_ASSISTANT_ID;
+  }
+
+  private getAssistantLabel(assistantId: AssistantId): string {
+    switch (assistantId) {
+      case 'professor':
+        return 'Il Professore';
+      case 'interview_coach':
+        return 'Interview Coach';
+      case 'study_tutor':
+        return 'Study Tutor';
+      case 'audioguide':
+        return 'Audioguida';
+      case 'immigration_assistant':
+        return 'Immigration Assistant';
+      case 'language_tutor':
+        return 'Language Tutor';
+      default:
+        return 'MemorAIz Assistant';
+    }
   }
 }

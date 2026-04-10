@@ -215,10 +215,20 @@ export class BrowserRagService {
     }
 
     const texts = chunks.map((c) => c.text);
-    const { embeddings } = await embedMany({
-      model: embeddingModel,
-      values: texts,
-    });
+    // Google Vertex AI limits batch requests to 100 items max.
+    // Split texts into batches and embed each batch separately.
+    const MAX_BATCH_SIZE = 100;
+    const embeddings: number[][] = [];
+
+    for (let i = 0; i < texts.length; i += MAX_BATCH_SIZE) {
+      const batch = texts.slice(i, i + MAX_BATCH_SIZE);
+      console.log(`[RAG] Embedding batch ${Math.floor(i / MAX_BATCH_SIZE) + 1}/${Math.ceil(texts.length / MAX_BATCH_SIZE)} (${batch.length} items)...`);
+      const { embeddings: batchEmbeddings } = await embedMany({
+        model: embeddingModel,
+        values: batch,
+      });
+      embeddings.push(...batchEmbeddings);
+    }
 
     const dimension = embeddings[0]?.length;
     if (!dimension) {

@@ -10,6 +10,11 @@ import { Agent } from '@mastra/core/agent';
 import { GeminiLiveVoice } from '@mastra/voice-google-gemini-live';
 import { PROFESSOR_INSTRUCTIONS, VOICE_CONFIG } from '../config/professorConfig.js';
 
+type CreateProfessorAgentOptions = {
+  instructions?: string;
+  name?: string;
+};
+
 function patchSetupForAudioResponses(voice: GeminiLiveVoice, speaker: string) {
   // function that patches the GeminiLiveVoice instance to ensure it requests audio responses in the setup event.
   const anyVoice = voice as any;
@@ -19,6 +24,17 @@ function patchSetupForAudioResponses(voice: GeminiLiveVoice, speaker: string) {
   const originalSendEvent = anyVoice.sendEvent.bind(anyVoice);
   anyVoice.sendEvent = (type: string, data: any) => {
     if (type === 'setup' && data?.setup) {
+      // Required by Google Live API to receive resumption tokens.
+      data.setup.session_resumption = data.setup.session_resumption ?? {};
+      data.setup.sessionResumption = data.setup.sessionResumption ?? {};
+
+      // Ask Gemini Live to emit real-time transcripts for both user audio and
+      // model audio, so the webpage can follow the full written script.
+      data.setup.input_audio_transcription = data.setup.input_audio_transcription ?? {};
+      data.setup.output_audio_transcription = data.setup.output_audio_transcription ?? {};
+      data.setup.inputAudioTranscription = data.setup.inputAudioTranscription ?? {};
+      data.setup.outputAudioTranscription = data.setup.outputAudioTranscription ?? {};
+
       data.setup.generation_config = data.setup.generation_config ?? {};
       data.setup.generation_config.response_modalities =
         data.setup.generation_config.response_modalities ?? ['AUDIO'];
@@ -47,11 +63,14 @@ export interface ProfessorAgent {
  * Creates a fully isolated professor agent for one user session.
  * Call once per incoming WebSocket connection; call destroy() on disconnect.
  */
-export function createProfessorAgent(): ProfessorAgent {
+export function createProfessorAgent(options: CreateProfessorAgentOptions = {}): ProfessorAgent {
   const apiKey = process.env.GOOGLE_API_KEY;
   if (!apiKey) {
     throw new Error('GOOGLE_API_KEY is required. Copy .env.example to .env and fill it in.');
   }
+
+  const instructions = options.instructions ?? PROFESSOR_INSTRUCTIONS;
+  const name = options.name ?? 'MemorAIz Assistant';
 
   const liveModel = (process.env.GEMINI_LIVE_MODEL ?? VOICE_CONFIG.model)
     .replace(/^models\//, '') as any;
@@ -63,14 +82,14 @@ export function createProfessorAgent(): ProfessorAgent {
     sessionConfig: VOICE_CONFIG.sessionConfig,
     // Uncomment to enable verbose Gemini Live API logs:
     //debug: true,
-  });
+  } as any);
 
   patchSetupForAudioResponses(voice, VOICE_CONFIG.speaker);
 
   const agent = new Agent({
     id: 'professor-agent',
-    name: 'MemorAIz Assistant',
-    instructions: PROFESSOR_INSTRUCTIONS,
+    name,
+    instructions,
     // The model field here is the TEXT fallback for agent.generate() calls.
     // For real-time voice, GeminiLiveVoice handles everything — this field is
     // largely unused in STS mode but required by the Agent constructor.

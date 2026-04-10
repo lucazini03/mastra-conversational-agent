@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MemorAIz — Note Tecniche Gemini Live API</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Mono:wght@400;500&family=DM+Sans:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ink: #0f0e0d;
+    --paper: #f5f2eb;
+    --paper-dark: #ede9df;
+    --accent: #c94a2a;
+    --gold: #b89a4e;
+    --gold-light: #f0e8d0;
+    --blue: #2a4a8a;
+    --blue-light: #d0d9f0;
+    --green: #2a6644;
+    --green-light: #c6e8d4;
+    --warn: #8a5a1a;
+    --warn-light: #f0e0c0;
+    --rule: rgba(15,14,13,0.12);
+  }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html { font-size: 16px; scroll-behavior: smooth; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: 'DM Sans', sans-serif;
+    font-weight: 300;
+    line-height: 1.7;
+    min-height: 100vh;
+  }
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 999;
+    opacity: 0.025;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+  }
+  header { border-bottom: 1px solid var(--rule); padding: 2.5rem 0 0; }
+  .header-inner { max-width: 820px; margin: 0 auto; padding: 0 2.5rem 2rem; }
+  .kicker {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.65rem;
+    font-weight: 500;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 1rem;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+  .kicker::after { content: ''; flex: 1; height: 1px; background: var(--accent); opacity: 0.35; max-width: 50px; }
+  h1 {
+    font-family: 'DM Serif Display', serif;
+    font-size: clamp(2.2rem, 4.5vw, 3.4rem);
+    line-height: 1.08;
+    font-weight: 400;
+    letter-spacing: -0.02em;
+    margin-bottom: 1rem;
+  }
+  h1 em { font-style: italic; color: var(--accent); }
+  .subtitle { font-size: 1rem; color: rgba(15,14,13,0.58); max-width: 540px; line-height: 1.55; margin-bottom: 1.6rem; }
+  .meta-row { display: flex; gap: 2rem; flex-wrap: wrap; }
+  .meta-item { font-family: 'DM Mono', monospace; font-size: 0.68rem; color: rgba(15,14,13,0.4); letter-spacing: 0.06em; }
+  .meta-item strong { color: var(--ink); font-weight: 500; }
+
+  main { max-width: 820px; margin: 0 auto; padding: 0 2.5rem 5rem; }
+
+  .toc {
+    margin: 2.5rem 0;
+    padding: 1.5rem 1.8rem;
+    background: var(--paper-dark);
+    border-left: 3px solid var(--ink);
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 0.4rem 2rem;
+  }
+  .toc-label { grid-column: 1/-1; font-family: 'DM Mono', monospace; font-size: 0.62rem; letter-spacing: 0.18em; text-transform: uppercase; opacity: 0.4; margin-bottom: 0.5rem; }
+  .toc a { font-size: 0.86rem; color: var(--ink); text-decoration: none; display: flex; align-items: baseline; gap: 0.5rem; padding: 0.12rem 0; transition: color 0.15s; }
+  .toc a:hover { color: var(--accent); }
+  .toc .num { font-family: 'DM Mono', monospace; font-size: 0.62rem; color: var(--accent); opacity: 0.7; min-width: 1.3rem; }
+
+  section { margin-top: 3.5rem; padding-top: 3rem; border-top: 1px solid var(--rule); animation: fadeUp 0.45s ease both; }
+  @keyframes fadeUp { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
+  section:nth-child(2) { animation-delay: 0.05s; }
+  section:nth-child(3) { animation-delay: 0.10s; }
+  section:nth-child(4) { animation-delay: 0.15s; }
+
+  .section-kicker { font-family: 'DM Mono', monospace; font-size: 0.6rem; letter-spacing: 0.2em; text-transform: uppercase; opacity: 0.38; margin-bottom: 0.5rem; }
+  h2 { font-family: 'DM Serif Display', serif; font-size: clamp(1.55rem, 3vw, 2.1rem); font-weight: 400; line-height: 1.15; margin-bottom: 1.4rem; letter-spacing: -0.01em; }
+  h3 { font-family: 'DM Sans', sans-serif; font-size: 0.75rem; font-weight: 500; letter-spacing: 0.14em; text-transform: uppercase; margin: 1.8rem 0 0.7rem; color: rgba(15,14,13,0.45); }
+  p { margin-bottom: 0.95rem; }
+  p:last-child { margin-bottom: 0; }
+
+  .callout { margin: 1.6rem 0; padding: 1.2rem 1.5rem; border-radius: 2px; position: relative; font-size: 0.92rem; }
+  .callout::before { font-family: 'DM Mono', monospace; font-size: 0.58rem; letter-spacing: 0.15em; text-transform: uppercase; font-weight: 500; position: absolute; top: -0.5rem; left: 1rem; padding: 0 0.4rem; }
+  .callout-warn { background: var(--warn-light); border: 1px solid rgba(138,90,26,0.3); }
+  .callout-warn::before { content: 'Attenzione'; background: var(--warn-light); color: var(--warn); }
+  .callout-good { background: var(--green-light); border: 1px solid rgba(42,102,68,0.3); }
+  .callout-good::before { content: 'Soluzione'; background: var(--green-light); color: var(--green); }
+  .callout-info { background: var(--blue-light); border: 1px solid rgba(42,74,138,0.3); }
+  .callout-info::before { content: 'Nota'; background: var(--blue-light); color: var(--blue); }
+  .callout-free { background: var(--gold-light); border: 1px solid rgba(184,154,78,0.35); }
+  .callout-free::before { content: 'Stato attuale'; background: var(--gold-light); color: var(--gold); }
+
+  .limits-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 1px; background: var(--rule); border: 1px solid var(--rule); margin: 1.6rem 0; }
+  .limit-card { background: var(--paper); padding: 1.3rem 1.1rem; }
+  .limit-card .limit-val { font-family: 'DM Serif Display', serif; font-size: 1.9rem; line-height: 1; margin-bottom: 0.25rem; }
+  .limit-card .limit-label { font-family: 'DM Mono', monospace; font-size: 0.6rem; letter-spacing: 0.1em; text-transform: uppercase; opacity: 0.42; margin-bottom: 0.45rem; }
+  .limit-card .limit-note { font-size: 0.8rem; opacity: 0.62; }
+  .limit-card.red .limit-val { color: var(--accent); }
+  .limit-card.gold .limit-val { color: var(--gold); }
+  .limit-card.green .limit-val { color: var(--green); }
+
+  .memory-timeline { margin: 1.6rem 0; border: 1px solid var(--rule); }
+  .mem-row { display: flex; gap: 1rem; padding: 1rem 1.2rem; border-bottom: 1px solid var(--rule); align-items: flex-start; }
+  .mem-row:last-child { border-bottom: none; }
+  .mem-badge { font-family: 'DM Mono', monospace; font-size: 0.62rem; font-weight: 500; letter-spacing: 0.06em; padding: 0.2rem 0.55rem; border-radius: 2px; flex-shrink: 0; margin-top: 0.18rem; white-space: nowrap; }
+  .mem-badge.ok { background: var(--green-light); color: var(--green); }
+  .mem-badge.mid { background: var(--gold-light); color: var(--gold); }
+  .mem-badge.bad { background: var(--warn-light); color: var(--warn); }
+  .mem-row-body { font-size: 0.9rem; }
+  .mem-row-body strong { font-weight: 500; display: block; margin-bottom: 0.12rem; }
+
+  .data-table { width: 100%; border-collapse: collapse; margin: 1.6rem 0; font-size: 0.87rem; }
+  .data-table th { font-family: 'DM Mono', monospace; font-size: 0.6rem; letter-spacing: 0.12em; text-transform: uppercase; font-weight: 500; color: rgba(15,14,13,0.45); text-align: left; padding: 0.55rem 0.9rem; border-bottom: 2px solid var(--rule); }
+  .data-table td { padding: 0.7rem 0.9rem; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  .data-table tr:last-child td { border-bottom: none; }
+  .data-table tr:hover td { background: var(--paper-dark); }
+  .data-table .mono { font-family: 'DM Mono', monospace; font-size: 0.78rem; }
+  .data-table .green { color: var(--green); font-weight: 500; }
+  .data-table .warn { color: var(--warn); font-weight: 500; }
+  .data-table .gold { color: var(--gold); font-weight: 500; }
+  .data-table .total-row td { background: var(--paper-dark); font-weight: 500; }
+  .cost-note { font-family: 'DM Mono', monospace; font-size: 0.66rem; color: rgba(15,14,13,0.38); margin-top: -1.2rem; margin-bottom: 1.4rem; padding-left: 0.9rem; }
+
+  footer { border-top: 1px solid var(--rule); padding: 1.8rem 2.5rem; max-width: 820px; margin: 0 auto; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem; }
+  footer p { font-family: 'DM Mono', monospace; font-size: 0.62rem; color: rgba(15,14,13,0.32); letter-spacing: 0.05em; margin: 0; }
+
+  @media (max-width: 640px) {
+    main, .header-inner, footer { padding-left: 1.3rem; padding-right: 1.3rem; }
+    .limits-grid { grid-template-columns: 1fr 1fr; }
+    .toc { grid-template-columns: 1fr; }
+    .mem-row { flex-direction: column; gap: 0.5rem; }
+    .data-table { font-size: 0.8rem; }
+    .data-table th, .data-table td { padding: 0.5rem 0.6rem; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="header-inner">
+    <div class="kicker">MemorAIz — Note Tecniche</div>
+    <h1>Gemini 3.1 Flash Live —<br><em>Report tecnico</em></h1>
+    <p class="subtitle">Limiti di sessione, memoria, documenti grandi e costi: una sintesi chiara di Gemini Live (agente conversazionale).</p>
+    <div class="meta-row">
+      <div class="meta-item"><strong>Modello</strong>&nbsp; gemini-3.1-flash-live-preview</div>
+      <div class="meta-item"><strong>Data</strong>&nbsp; Aprile 2026</div>
+    </div>
+  </div>
+</header>
+
+<main>
+
+  <nav class="toc">
+    <div class="toc-label">Indice</div>
+    <a href="#sessions"><span class="num">01</span>Limiti di sessione e soluzioni</a>
+    <a href="#context"><span class="num">02</span>Memoria e context window</a>
+    <a href="#books"><span class="num">03</span>Se gli diamo un libro intero</a>
+    <a href="#price"><span class="num">04</span>Costi</a>
+  </nav>
+
+
+  <!-- ─── 01 ─── -->
+  <section id="sessions">
+    <div class="section-kicker">Sezione 01</div>
+    <h2>Limiti di Sessione e Come Aggirarli</h2>
+
+    <p>Esistono due tipi di limite distinti, con cause e soluzioni diverse. È importante non confonderli.</p>
+
+    <div class="limits-grid">
+      <div class="limit-card red">
+        <div class="limit-label">Connessione WebSocket</div>
+        <div class="limit-val">~10 min</div>
+        <div class="limit-note">Limite infrastrutturale: la connessione scade dopo 10 minuti. Senza session resume, la conversazione si interrompe e la memoria viene persa.</div>
+      </div>
+      <div class="limit-card red">
+        <div class="limit-label">Input audio continuo</div>
+        <div class="limit-val">15 min</div>
+        <div class="limit-note">Tempo massimo di parlato elaborabile in una singola sessione standard. Anche con connessione stabile, qui il sistema raggiunge il limite di processamento.</div>
+      </div>
+      <div class="limit-card gold">
+        <div class="limit-label">Memoria massima</div>
+        <div class="limit-val">128k token</div>
+        <div class="limit-note">Capacità totale della finestra di contesto. Misura la memoria tecnica (il limite dei 15 min di audio vi corrisponde).</div>
+      </div>
+      <div class="limit-card green">
+        <div class="limit-label">Con session resume</div>
+        <div class="limit-val">∞</div>
+        <div class="limit-note">Sessioni prolungate sono realizzabili ripristinando la connessione ogni ~10 minuti e comprimendo il contesto.</div>
+      </div>
+    </div>
+
+    <h3>Come i limiti si legano insieme</h3>
+
+    <p>Il limite di 15 minuti e quello di 128k token sono due facce della stessa moneta:</p>
+
+    <p><strong>L'audio si converte in token</strong> — anche mentre parli, il sistema trasforma la tua voce in dati numerici. Un flusso audio tipico occupa circa 20–40 token al secondo. In 15 minuti (900 secondi) consumi tra i 18.000 e i 36.000 token <em>solo per l'input</em>.</p>
+
+    <p><strong>Perché proprio 15 minuti?</strong> — Sebbene 36k token siano molto meno della capacità totale di 128k, Google impone il limite temporale di 15 minuti come "buffer di sicurezza" per garantire spazio sufficiente per:</p>
+    <ul style="margin: 0.8rem 0 1rem 1.8rem; list-style: disc;">
+      <li>La risposta del modello (che occupa a sua volta token)</li>
+      <li>Frammenti RAG e metadati</li>
+      <li>Margine per compressione del contesto</li>
+    </ul>
+
+    <h3>La soluzione: Session Resume</h3>
+
+    <p>Durante la sessione, Google invia periodicamente un "segnalibro" (token di ripresa). Quando la connessione scade dopo ~10 minuti, il codice riapre automaticamente una nuova connessione passando quel segnalibro: Google ripristina il contesto sul proprio server e la conversazione riprende da dove si era fermata. Lo studente percepisce al massimo 1–2 secondi di silenzio.</p>
+
+    <div class="callout callout-good">
+      <strong>Risultato pratico:</strong> implementando session resume, uno studente può avere una sessione di studio di ore senza interruzioni visibili. La connessione si rinnova ogni ~10 minuti in background.
+    </div>
+
+    <div class="callout callout-warn">
+      <strong>Limite residuo:</strong> i token di ripresa hanno una validità di 2 ore dall'ultima interruzione. Se uno studente abbandona la sessione per più di 2 ore e poi torna, la riconnessione ripartirà da zero senza memoria della sessione precedente.
+    </div>
+
+  </section>
+
+
+  <!-- ─── 02 ─── -->
+  <section id="context">
+    <div class="section-kicker">Sezione 02</div>
+    <h2>Memoria e Context Window</h2>
+
+    <p>La finestra di contesto del modello Live è <strong>128.000 token</strong> — molto inferiore al milione di token della versione standard di Gemini 3 Flash. Capire quanto velocemente si riempie è fondamentale per prevedere il comportamento del sistema.</p>
+
+    <h3>Quanto si consuma in una sessione tipica?</h3>
+    <p>Ipotizziamo una conversazione realistica: metà input (studente parla) e metà output (AI risponde), con una chiamata RAG ogni 5 minuti circa.</p>
+
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Fonte di consumo</th>
+          <th>Velocità</th>
+          <th>Token in 30 min</th>
+          <th>Token in 60 min</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Audio studente (input)</td>
+          <td class="mono">25 tok/sec</td>
+          <td class="mono">~22.500</td>
+          <td class="mono">~45.000</td>
+        </tr>
+        <tr>
+          <td>Audio AI (output)</td>
+          <td class="mono">25 tok/sec</td>
+          <td class="mono">~22.500</td>
+          <td class="mono">~45.000</td>
+        </tr>
+        <tr>
+          <td>Chiamate RAG (6 × 1.500 tok)</td>
+          <td class="mono">~9.000 tot.</td>
+          <td class="mono">~9.000</td>
+          <td class="mono">~18.000</td>
+        </tr>
+        <tr class="total-row">
+          <td><strong>Totale stimato</strong></td>
+          <td>—</td>
+          <td class="mono gold"><strong>~54.000</strong> (42% del limite)</td>
+          <td class="mono warn"><strong>~108.000</strong> (84% del limite)</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>Dopo 60 minuti il contesto è all'84% della capienza — la compressione inizia a operare visibilmente nella seconda metà della sessione. È una soglia gestita, non una crisi.</p>
+
+    <h3>L'AI dimentica le cose in modo serio?</h3>
+    <p>Il dimenticamento è <em>graduale e controllato</em>, non improvviso. Il sistema comprime i turni più vecchi in un riassunto, non li cancella. Le conseguenze pratiche cambiano a seconda della durata:</p>
+
+    <div class="memory-timeline">
+      <div class="mem-row">
+        <span class="mem-badge ok">Breve &lt; 30 min</span>
+        <div class="mem-row-body">
+          <strong>Nessun dimenticamento</strong>
+          La conversazione è intatta dall'inizio alla fine. Copre la grande maggioranza delle sessioni di studio reali.
+        </div>
+      </div>
+      <div class="mem-row">
+        <span class="mem-badge mid">Media 30–90 min</span>
+        <div class="mem-row-body">
+          <strong>Compressione progressiva dei turni più vecchi</strong>
+          Il modello ricorda i concetti e i temi trattati, ma può perdere il dettaglio verbatim di scambi avvenuti all'inizio. Funzionalmente accettabile per la tutoria.
+        </div>
+      </div>
+      <div class="mem-row">
+        <span class="mem-badge bad">Lunga 90+ min</span>
+        <div class="mem-row-body">
+          <strong>I primi 20–30 minuti vengono riassunti</strong>
+          Se lo studente torna su un argomento discusso nella prima mezz'ora, il modello sa che ne hanno parlato ma non ricorda il dettaglio preciso. Il RAG compensa: la conoscenza del documento viene recuperata fresca ad ogni domanda, indipendentemente dalla memoria conversazionale.
+        </div>
+      </div>
+    </div>
+
+    <div class="callout callout-info">
+      <strong>Il RAG come rete di sicurezza:</strong> anche se la memoria conversazionale sbiadisce nelle sessioni lunghe, la conoscenza del documento non viene mai "dimenticata". Ogni ricerca accede all'indice completo del PDF in modo fresco, indipendentemente da quante ore è durata la sessione.
+    </div>
+
+  </section>
+
+
+  <!-- ─── 03 ─── -->
+  <section id="books">
+    <div class="section-kicker">Sezione 03</div>
+    <h2>Se Gli Diamo un Libro Intero</h2>
+
+    <p>Il sistema RAG è progettato per gestire documenti grandi. Cosa succede concretamente se si carica un manuale universitario di 400 pagine invece di un riassunto da 10?</p>
+
+    <h3>All'avvio del server (una tantum)</h3>
+    <p>Il costo di indicizzazione è proporzionale alla dimensione del documento. Un libro di 400 pagine richiede proporzionalmente più tempo per essere processato rispetto a un riassunto. Questo avviene <em>una sola volta</em> all'avvio — dopodiché il risultato viene salvato su disco e riutilizzato ad ogni riavvio successivo senza rielaborazione.</p>
+
+    <h3>Durante la conversazione</h3>
+    <p>La velocità di risposta è <strong>praticamente indipendente dalla dimensione del documento</strong>. Quando l'AI cerca informazioni, recupera sempre e solo i 5 frammenti più pertinenti — non importa se il libro ha 100 o 100.000 frammenti. La ricerca nel database è quasi istantanea in entrambi i casi.</p>
+    <p>L'unica latenza percepibile è una pausa di circa 300–600 ms durante la quale l'AI smette di parlare, consulta il documento, e poi riprende. Questo vale per qualsiasi documento, grande o piccolo.</p>
+
+    <h3>Qualità delle risposte con testi molto densi</h3>
+    <p>Con un libro tecnico e denso, il sistema recupera i 5 frammenti statisticamente più simili alla domanda. Se l'argomento è concentrato in poche pagine consecutive, i frammenti vengono trovati bene. Se invece l'argomento è distribuito su capitoli diversi, il singolo frammento recuperato potrebbe non catturare tutto il contesto necessario — e la risposta sarà meno completa. È una limitazione della tecnica RAG in generale, non specifica di questa implementazione.</p>
+
+    <div class="callout callout-info">
+      <strong>In sintesi:</strong> dare all'AI un libro intero funziona bene. La qualità dipende più da quanto il testo è ben scritto e strutturato che dalla sua lunghezza. La velocità rimane costante.
+    </div>
+
+  </section>
+
+
+  <!-- ─── 04 ─── -->
+  <section id="price">
+    <div class="section-kicker">Sezione 04</div>
+    <h2>Costi</h2>
+
+    <div class="callout callout-free">
+      <strong>Oggi il modello è gratuito.</strong> <code>gemini-3.1-flash-live-preview</code> è ancora in fase preview e Google lo offre senza costi diretti per token. Nota per chi è in Italia (zona EEA): Google richiede formalmente di usare il tier a pagamento — vale la pena verificare il proprio dashboard di fatturazione su AI Studio per confermare lo stato dell'account.
+    </div>
+
+    <h3>Quando diventerà a pagamento</h3>
+
+    <p>Il modello di fatturazione del Live API è <em>cumulativo a livello di token</em>: ad ogni turno vengono conteggiati non solo i token del turno corrente, ma anche tutti i token accumulati nel contesto dall'inizio della sessione. Una sessione lunga costa quindi proporzionalmente di più di tante sessioni brevi equivalenti — ma la compressione del contesto mantiene il costo sotto controllo impedendo crescite illimitate.</p>
+
+    <p>Le stime seguenti usano: metà input (studente), metà output (AI), una chiamata RAG ogni 5 minuti, e prezzi di riferimento di <strong>$0,50/M token input</strong> e <strong>$3,00/M token output</strong> — stima prudente basata sui prezzi attuali dei modelli Flash analoghi.</p>
+
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Durata sessione</th>
+          <th>Token totali stimati</th>
+          <th>Costo / sessione</th>
+          <th>100 utenti/giorno</th>
+          <th>1.000 utenti/giorno</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>10 minuti</strong></td>
+          <td class="mono">~18.000</td>
+          <td class="mono green">~$0,007</td>
+          <td class="mono green">~$0,70/g</td>
+          <td class="mono green">~$7/g</td>
+        </tr>
+        <tr>
+          <td><strong>30 minuti</strong></td>
+          <td class="mono">~54.000</td>
+          <td class="mono green">~$0,025</td>
+          <td class="mono">~$2,50/g</td>
+          <td class="mono">~$25/g</td>
+        </tr>
+        <tr>
+          <td><strong>60 minuti</strong></td>
+          <td class="mono">~108.000</td>
+          <td class="mono warn">~$0,07</td>
+          <td class="mono warn">~$7/g</td>
+          <td class="mono warn">~$70/g</td>
+        </tr>
+        <tr>
+          <td><strong>90 minuti</strong></td>
+          <td class="mono">~145.000 (compressa)</td>
+          <td class="mono warn">~$0,10</td>
+          <td class="mono warn">~$10/g</td>
+          <td class="mono warn">~$100/g</td>
+        </tr>
+      </tbody>
+    </table>
+    <p class="cost-note">* Oltre ~100k token la compressione rallenta la crescita del costo nelle sessioni lunghe. I valori sono stime conservative.</p>
+
+    <p>A titolo di confronto: <strong>100 utenti che studiano 30 minuti al giorno costerebbero circa $75 al mese</strong> — pienamente sostenibile. Con 1.000 utenti attivi giornalmente per sessioni da 30 minuti si arriverebbe a circa $750/mese, comparabile a qualsiasi servizio cloud di media scala.</p>
+
+    <div class="callout callout-info">
+      <strong>La variabile più importante da monitorare</strong> non è il prezzo per token, ma il tempo medio di sessione degli studenti. Una sessione da 90 minuti costa 10× più di una da 10 minuti. Raccogliere dati sul comportamento reale degli utenti sarà la chiave per prevedere i costi futuri con precisione.
+    </div>
+
+  </section>
+
+</main>
+
+<footer>
+  <p>MemorAIz Note Tecniche &nbsp;·&nbsp; Aprile 2026</p>
+  <p>Fonti: cloud.google.com/vertex-ai/generative-ai/pricing &nbsp;·&nbsp; ai.google.dev/gemini-api/docs/live-session</p>
+</footer>
+
+</body>
+</html>
