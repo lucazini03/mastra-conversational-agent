@@ -346,9 +346,7 @@ export class SessionHandler {
         // Fresh session: send the opening prompt
         this.geminiSpeakFirst(
           voice,
-          `Sei l'assistente di MemorAIz. ` +
-            `Presentati.` +
-            `Quando la richiesta riguarda documenti, usa il tool search_documents prima di rispondere.`,
+            this.getOpeningPrompt(this.selectedAssistantId)
         );
       } else {
         if (reconnectWithHandle) {
@@ -787,4 +785,29 @@ export class SessionHandler {
         return 'MemorAIz Assistant';
     }
   }
+
+  private getOpeningPrompt(assistantId: AssistantId): string {
+  switch (assistantId) {
+    case 'professor':
+      return `Usa search_documents adesso per identificare la materia e gli argomenti principali del documento caricato. Poi, senza aspettare, presentati come "il professore di [materia]" e chiedi allo studente il suo nome e il suo livello di istruzione. Sii diretto e formale, ma non freddo.`;
+
+    case 'interview_coach':
+      return `Usa search_documents adesso per estrarre: nome dell'azienda, titolo del ruolo, responsabilità principali, requisiti. Poi, immediatamente, apri il colloquio presentandoti come un HR della società trovata nel documento. Usa "Lei". Annuncia che al termine darai un feedback. Chiedi se il candidato è pronto.`;
+
+    case 'study_tutor':
+      return `Usa search_documents adesso per capire l'argomento principale del documento. Poi presentati in modo amichevole e informale, dì cosa hai trovato e chiedi allo studente su cosa vuole lavorare oggi — se vuole capire meglio qualcosa, ripassare, o fare domande.`;
+
+    case 'audioguide':
+      return `Usa search_documents adesso per identificare il museo, il sito, le opere o i reperti presenti nel documento. Poi dai il benvenuto al visitatore in modo evocativo e narrativo, presentando brevemente il percorso che farete insieme. Chiedi se è pronto per iniziare.`;
+
+    case 'immigration_assistant':
+      return `Presentati in modo semplice e rassicurante. Usa frasi corte e paratattiche.`;
+
+    case 'language_tutor':
+      return `Saluta l'utente in modo amichevole e chiedi subito: quale lingua vuole praticare, il suo livello approssimativo, e se preferisce un contesto specifico o una conversazione libera.`;
+
+    default:
+      return `Usa search_documents per esplorare il documento caricato. Poi presentati come assistente di MemorAIz e chiedi all'utente come puoi aiutarlo oggi.`;
+  }
+}
 }
