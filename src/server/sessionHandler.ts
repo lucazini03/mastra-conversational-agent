@@ -450,11 +450,11 @@ export class SessionHandler {
         const asString = typeof payload === 'string' ? payload : payload.toString();
         const data = JSON.parse(asString) as any;
         // In attachGeminiMessageSpy, dentro il listener
-        const usage = data?.usageMetadata ?? data?.usage_metadata;
-        if (usage) {
-          console.log(`[${this.sessionId}] RAW usageMetadata turn ${this.costTracker['usageEventsSeen']}:`, 
-            JSON.stringify(usage));
-        }
+        // const usage = data?.usageMetadata ?? data?.usage_metadata;
+        // if (usage) {
+        //   console.log(`[${this.sessionId}] RAW usageMetadata turn ${this.costTracker['usageEventsSeen']}:`, 
+        //     JSON.stringify(usage));
+        // }
 
         this.costTracker.captureUsageMetadata(data);
         this.mirrorAutomaticTranscriptions(data);
