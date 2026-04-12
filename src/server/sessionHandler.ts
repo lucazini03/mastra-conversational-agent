@@ -449,6 +449,12 @@ export class SessionHandler {
         const payload = this.normalizeIncomingMessage(raw);
         const asString = typeof payload === 'string' ? payload : payload.toString();
         const data = JSON.parse(asString) as any;
+        // In attachGeminiMessageSpy, dentro il listener
+        const usage = data?.usageMetadata ?? data?.usage_metadata;
+        if (usage) {
+          console.log(`[${this.sessionId}] RAW usageMetadata turn ${this.costTracker['usageEventsSeen']}:`, 
+            JSON.stringify(usage));
+        }
 
         this.costTracker.captureUsageMetadata(data);
         this.mirrorAutomaticTranscriptions(data);
@@ -608,7 +614,7 @@ export class SessionHandler {
 
   // ─── RAG Tool ────────────────────────────────────────────────────────────────
 
-  private attachRagTool(voice: any) {
+  private attachRagTool(voice: any) { // the model has a field called "tools" which is a map of tool definitions
     voice.addTools({
       search_documents: {
         description: 'Cerca informazioni nei PDF locali indicizzati dal server.',
