@@ -5,6 +5,7 @@ dist
 .env.development
 *.db
 .env
+.envgii
 *.db-*
 .netlify
 .vercel
