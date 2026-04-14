@@ -52,7 +52,7 @@ Questo permette di testare e distribuire l'assistente per scenari completamente 
 1. Installa le dipendenze:
    ```bash
    npm install
-       ```
+   ```
 
 2. Avvia il server:
    ```bash
