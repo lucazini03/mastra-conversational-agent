@@ -582,7 +582,7 @@ export class SessionHandler {
     if (!text) return;
 
     this.sendJSON({ type: 'transcript', role, text });
-    console.log(`[${this.sessionId}] ${role} (transcription): ${text}`);
+    //console.log(`[${this.sessionId}] ${role} (transcription): ${text}`);
   }
 
   private mirrorAutomaticTranscriptions(data: any) {
