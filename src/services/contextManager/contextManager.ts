@@ -11,7 +11,8 @@
 //   1. Fully decoupled from the WebSocket handler — communicates via methods & EventEmitter.
 //   2. Delta-only extraction: only sends transcript accumulated since the last extraction.
 //   3. Volatile buffer: captures any transcript arriving between extraction start and WS switch.
-//   4. Atomic switch: the switch only happens when extraction succeeded AND time threshold met.
+//   4. Atomic switch: the switch fires at the first turnComplete AFTER extraction completes
+//      (the natural silence moment when Gemini has finished speaking).
 
 import { EventEmitter } from 'events';
 import { generateObject } from 'ai';
@@ -27,11 +28,6 @@ const MEMORY_EXTRACTION_TOKEN_THRESHOLD = parseInt(
 );
 
 const MEMORY_EXTRACTION_MODEL = process.env.MEMORY_EXTRACTION_MODEL ?? 'gemini-2.5-flash';
-
-const WEBSOCKET_SWITCH_TIME_MS = parseInt(
-  process.env.WEBSOCKET_SWITCH_TIME_MS ?? '480000', // 8 minutes
-  10,
-);
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -56,7 +52,7 @@ export interface InjectionPayload {
 }
 
 export interface ContextManagerEvents {
-  /** Fired when extraction + time thresholds are met and a switch is ready. */
+  /** Fired at the first turnComplete after a successful extraction. */
   switchReady: [payload: InjectionPayload];
   /** Fired when an extraction completes (success or failure). */
   extractionDone: [success: boolean, error?: string];
@@ -82,12 +78,9 @@ export class ContextManager extends EventEmitter<ContextManagerEvents> {
 
   // ── Volatile buffer ──────────────────────────────────────────────────────
   // Accumulates raw transcript text between the start of an extraction and
-  // the actual WebSocket switch.
+  // the actual WebSocket switch (i.e. the next turnComplete after extraction).
   private unprocessedBuffer: string[] = [];
   private bufferingSinceExtraction = false;
-
-  // ── WebSocket switch timing ──────────────────────────────────────────────
-  private connectionStartMs = Date.now();
 
   constructor(opts: {
     sessionId: string;
@@ -136,19 +129,18 @@ export class ContextManager extends EventEmitter<ContextManagerEvents> {
   /**
    * Called when a Gemini turn completes (`serverContent.turnComplete`).
    *
-   * If an extraction was flagged, this kicks it off asynchronously.
-   * If an extraction already succeeded and the time threshold is met,
-   * this emits `switchReady`.
+   * Two paths:
+   *   A. Extraction already finished → this is the natural silence moment
+   *      right after Gemini stopped speaking. Emit `switchReady` NOW.
+   *   B. Extraction flagged but not started → kick off the async extraction.
+   *      The volatile buffer will capture anything that happens while it runs.
+   *      When the extraction finishes, the NEXT turnComplete will hit path A.
    */
   onTurnComplete(): void {
-    // ── Path A: extraction already done, check if switch is due ──────────
+    // ── Path A: extraction done → switch at this silence moment ──────────
     if (this.extractionSucceeded && !this.extractionInProgress) {
-      const elapsed = Date.now() - this.connectionStartMs;
-      if (elapsed >= WEBSOCKET_SWITCH_TIME_MS) {
-        this.emitSwitchReady();
-        return;
-      }
-      // Not yet time — will check again on next turnComplete.
+      this.emitSwitchReady();
+      return;
     }
 
     // ── Path B: extraction flagged, kick it off ──────────────────────────
@@ -176,9 +168,8 @@ export class ContextManager extends EventEmitter<ContextManagerEvents> {
     };
   }
 
-  /** Reset timing after a successful WebSocket switch. */
+  /** Reset state after a successful WebSocket switch. */
   onWebSocketSwitched(): void {
-    this.connectionStartMs = Date.now();
     this.extractionSucceeded = false;
     this.extractionFlaggedForNextTurn = false;
     this.bufferingSinceExtraction = false;
@@ -196,7 +187,7 @@ export class ContextManager extends EventEmitter<ContextManagerEvents> {
     return this.extractionInProgress;
   }
 
-  /** Whether a switch is pending (extraction done, waiting for time). */
+  /** Whether a switch is pending (extraction done, waiting for next turnComplete). */
   get isSwitchPending(): boolean {
     return this.extractionSucceeded && !this.extractionInProgress;
   }
@@ -313,7 +304,7 @@ INSTRUCTIONS:
     if (!payload) return;
 
     console.log(
-      `[${this.sessionId}] ContextManager: emitting switchReady. Buffer lines: ${this.unprocessedBuffer.length}, elapsed: ${((Date.now() - this.connectionStartMs) / 1000).toFixed(0)}s`,
+      `[${this.sessionId}] ContextManager: emitting switchReady at turnComplete. Buffer lines: ${this.unprocessedBuffer.length}`,
     );
 
     this.emit('switchReady', payload);
