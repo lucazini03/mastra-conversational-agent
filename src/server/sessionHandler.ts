@@ -25,6 +25,7 @@ import {
 } from '../config/professorConfig.js';
 import { browserRagService } from './ragService.js';
 import { SessionCostTracker } from './sessionCostTracker.js';
+import { ContextManager, type InjectionPayload } from '../services/contextManager/index.js';
 
 // How long to wait before attempting a reconnect after Google drops the line.
 // Keep this short (1-2 s) so the user barely notices the gap.
@@ -49,6 +50,9 @@ export class SessionHandler {
   private costTracker = new SessionCostTracker();
   private sessionCostSummarySent = false;
   private selectedAssistantId: AssistantId = DEFAULT_ASSISTANT_ID;
+
+  // ── Context Compaction (Observational Memory) ─────────────────────────────
+  private contextManager: ContextManager | null = null;
 
   // ── Session Resumption state ─────────────────────────────────────────────
   // Google sends sessionResumptionUpdate messages throughout the session.
@@ -209,6 +213,16 @@ export class SessionHandler {
     this.reconnectAttempts = 0;
     this.costTracker.reset();
     this.sessionCostSummarySent = false;
+
+    // Initialise ContextManager for this session & assistant.
+    const basePrompt = getAssistantInstructions(this.selectedAssistantId);
+    this.contextManager = new ContextManager({
+      sessionId: this.sessionId,
+      assistantId: this.selectedAssistantId,
+      baseSystemPrompt: basePrompt,
+    });
+    this.contextManager.on('switchReady', (payload) => this.handleContextSwitch(payload));
+
     await this.connectToGemini(false);
   }
 
@@ -302,6 +316,13 @@ export class SessionHandler {
       voice.on('writing', ({ text, role }: { text: string; role: string }) => {
         this.sendJSON({ type: 'transcript', role, text });
         console.log(`[${this.sessionId}] ${role}: ${text}`);
+        // Feed into ContextManager for compaction (the spy also feeds from
+        // mirrorAutomaticTranscriptions, but the 'writing' event may arrive
+        // from different code paths in the SDK — duplicates are harmless as
+        // transcript text is append-only).
+        if (role === 'user' || role === 'model') {
+          this.contextManager?.addTranscriptEntry(role, text);
+        }
       });
 
       voice.on('toolCall', ({ name, args, id }: { name: string; args: unknown; id: string }) => {
@@ -411,6 +432,138 @@ export class SessionHandler {
     }, RECONNECT_DELAY_MS);
   }
 
+  // ─── Context Compaction: WebSocket Switch ────────────────────────────────────
+  //
+  // When the ContextManager determines that:
+  //   1. An extraction succeeded (compact state is ready), AND
+  //   2. The current WebSocket has been alive longer than WEBSOCKET_SWITCH_TIME_MS
+  // …it emits `switchReady` with the full injection payload. We then:
+  //   - Create a new GeminiLiveVoice with the enriched system_instruction.
+  //   - Swap it in atomically (same pattern as reconnect).
+  //   - Clear the ContextManager's buffers.
+
+  private async handleContextSwitch(payload: InjectionPayload): Promise<void> {
+    if (this.isStarting || this.isReconnecting || this.intentionalClose) return;
+
+    console.log(
+      `[${this.sessionId}] Context switch: injecting compact state + buffer (${payload.unprocessedBuffer.length} chars) into new WebSocket.`,
+    );
+    this.sendStatus('Ottimizzazione della memoria in corso...');
+
+    await this.connectToGeminiWithContext(payload);
+  }
+
+  /**
+   * Similar to connectToGemini(isReconnect=true) but injects the ContextManager's
+   * combined system instruction (base prompt + compact state + volatile buffer)
+   * into the new connection's setup event.
+   */
+  private async connectToGeminiWithContext(payload: InjectionPayload): Promise<void> {
+    if (this.isStarting) return;
+    this.isStarting = true;
+
+    let createdProfessor: ProfessorAgent | null = null;
+
+    try {
+      createdProfessor = createProfessorAgent({
+        instructions: payload.systemInstruction,
+        name: this.getAssistantLabel(this.selectedAssistantId),
+      });
+      const { voice } = createdProfessor;
+
+      // Inject resumption handle if available (preserves audio state).
+      if (this.resumptionHandle) {
+        const handle = this.resumptionHandle;
+        const anyVoice = voice as any;
+        if (typeof anyVoice.sendEvent === 'function') {
+          const originalSendEvent = anyVoice.sendEvent.bind(anyVoice);
+          anyVoice.sendEvent = (type: string, data: any) => {
+            if (type === 'setup' && data?.setup) {
+              this.withSessionResumption(data, handle);
+              console.log(`[${this.sessionId}] Context switch: injecting resumption handle ${handle.slice(0, 12)}...`);
+            }
+            return originalSendEvent(type, data);
+          };
+        }
+      }
+
+      // Re-wire audio, transcripts, error handling — same as connectToGemini.
+      voice.on('speaker', (audioStream: NodeJS.ReadableStream) => {
+        audioStream.on('data', (chunk: Buffer | Uint8Array | string) => {
+          if (this.ws.readyState !== WebSocket.OPEN) return;
+          let buf: Buffer =
+            typeof chunk === 'string'
+              ? Buffer.from(chunk)
+              : Buffer.isBuffer(chunk)
+                ? chunk
+                : Buffer.from(chunk);
+          if (this.pendingTtsByte) {
+            buf = Buffer.concat([this.pendingTtsByte, buf]);
+            this.pendingTtsByte = null;
+          }
+          if (buf.byteLength % 2 !== 0) {
+            this.pendingTtsByte = buf.slice(buf.byteLength - 1);
+            buf = buf.slice(0, buf.byteLength - 1);
+          }
+          if (buf.byteLength === 0) return;
+          this.sendJSON({ type: 'tts_audio', data: buf.toString('base64') });
+        });
+        audioStream.on('error', (streamErr: Error) => {
+          console.warn(`[${this.sessionId}] Speaker stream error:`, streamErr.message);
+        });
+        audioStream.on('end', () => { this.pendingTtsByte = null; });
+      });
+
+      voice.on('writing', ({ text, role }: { text: string; role: string }) => {
+        this.sendJSON({ type: 'transcript', role, text });
+        if (role === 'user' || role === 'model') {
+          this.contextManager?.addTranscriptEntry(role, text);
+        }
+      });
+
+      voice.on('toolCall', ({ name, args, id }: { name: string; args: unknown; id: string }) => {
+        console.log(`[${this.sessionId}] Tool call: ${name} (id=${id})`, args);
+      });
+
+      voice.on('error', (err: { message: string }) => {
+        console.warn(`[${this.sessionId}] Voice error after context switch:`, err.message);
+        if (!this.intentionalClose) this.scheduleReconnect();
+      });
+
+      this.attachRagTool(voice);
+      await voice.connect();
+      this.attachGeminiMessageSpy(voice);
+
+      // Atomic swap.
+      const oldProfessor = this.professor;
+      this.professor = createdProfessor;
+      createdProfessor = null;
+
+      if (oldProfessor) {
+        oldProfessor.destroy().catch(() => {});
+      }
+
+      this.reconnectAttempts = 0;
+      this.isReconnecting = false;
+      this.flushPendingTextPrompts(voice);
+
+      // Tell ContextManager the switch succeeded — reset timers & buffer.
+      this.contextManager?.onWebSocketSwitched();
+
+      this.sendStatus('Memoria ottimizzata. La conversazione continua.');
+      console.log(`[${this.sessionId}] Context switch completed successfully.`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[${this.sessionId}] Context switch failed:`, message);
+      if (createdProfessor) {
+        await createdProfessor.destroy();
+      }
+      // Fallback: keep the current connection alive — don't crash the session.
+    } finally {
+      this.isStarting = false;
+    }
+  }
+
   // ─── Raw Gemini WebSocket message spy ───────────────────────────────────────
   //
   // We attach a listener to the underlying Gemini WebSocket to intercept two
@@ -507,6 +660,16 @@ export class SessionHandler {
           });
         }
 
+        // ── Context Compaction: detect turnComplete & feed token usage ────
+        const turnComplete =
+          data?.serverContent?.turnComplete === true ||
+          data?.server_content?.turn_complete === true;
+        if (turnComplete && this.contextManager) {
+          // Feed latest token snapshot to ContextManager for threshold check.
+          this.contextManager.checkTokenThreshold(this.costTracker.getInputTokenSnapshot());
+          this.contextManager.onTurnComplete();
+        }
+
       } catch {
         // Ignore non-JSON frames — this listener is best-effort
       }
@@ -588,7 +751,7 @@ export class SessionHandler {
     if (!text) return;
 
     this.sendJSON({ type: 'transcript', role, text });
-    //console.log(`[${this.sessionId}] ${role} (transcription): ${text}`);
+    this.contextManager?.addTranscriptEntry(role, text);
   }
 
   private mirrorAutomaticTranscriptions(data: any) {
@@ -700,6 +863,11 @@ export class SessionHandler {
     this.pendingTtsByte = null;
     this.pendingTextPrompts = [];
     this.isReconnecting = false;
+
+    if (this.contextManager) {
+      this.contextManager.removeAllListeners();
+      this.contextManager = null;
+    }
 
     if (this.geminiWs && this.geminiWsMessageListener) {
       this.geminiWs.off('message', this.geminiWsMessageListener);

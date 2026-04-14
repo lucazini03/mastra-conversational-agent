@@ -103,6 +103,11 @@ export class SessionCostTracker {
     this.usageHistory = [];
   }
 
+  /** Returns a snapshot of input token totals for threshold checks. */
+  getInputTokenSnapshot(): { inputText: number; inputAudio: number } {
+    return { inputText: this.usageTotals.inputText, inputAudio: this.usageTotals.inputAudio };
+  }
+
   captureUsageMetadata(payload: unknown) {
     const visited = new Set<object>();
     const usageObjects: unknown[] = [];
