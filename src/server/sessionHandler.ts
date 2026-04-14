@@ -547,8 +547,9 @@ export class SessionHandler {
       this.isReconnecting = false;
       this.flushPendingTextPrompts(voice);
 
-      // Tell ContextManager the switch succeeded — reset timers & buffer.
-      this.contextManager?.onWebSocketSwitched();
+      // Tell ContextManager the switch succeeded — snapshot token count for delta threshold.
+      const snap = this.costTracker.getInputTokenSnapshot();
+      this.contextManager?.onWebSocketSwitched(snap.inputText + snap.inputAudio);
 
       this.sendStatus('Memoria ottimizzata. La conversazione continua.');
       console.log(`[${this.sessionId}] Context switch completed successfully.`);

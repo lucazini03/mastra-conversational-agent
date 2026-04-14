@@ -76,6 +76,12 @@ export class ContextManager extends EventEmitter<ContextManagerEvents> {
   private extractionSucceeded = false;
   private extractionFlaggedForNextTurn = false;
 
+  // ── Threshold delta tracking (Bug 2 fix) ─────────────────────────────────
+  // Token count at the time of the last successful switch. The next extraction
+  // triggers only when (currentTokens - lastSwitchTokenCount) >= threshold,
+  // preventing infinite re-triggers after the first switch.
+  private lastSwitchTokenCount = 0;
+
   // ── Volatile buffer ──────────────────────────────────────────────────────
   // Accumulates raw transcript text between the start of an extraction and
   // the actual WebSocket switch (i.e. the next turnComplete after extraction).
@@ -118,10 +124,11 @@ export class ContextManager extends EventEmitter<ContextManagerEvents> {
     if (this.extractionSucceeded) return; // already have a pending switch
 
     const totalInput = usage.inputText + usage.inputAudio;
-    if (totalInput >= MEMORY_EXTRACTION_TOKEN_THRESHOLD) {
+    const delta = totalInput - this.lastSwitchTokenCount;
+    if (delta >= MEMORY_EXTRACTION_TOKEN_THRESHOLD) {
       this.extractionFlaggedForNextTurn = true;
       console.log(
-        `[${this.sessionId}] ContextManager: token threshold reached (${totalInput} >= ${MEMORY_EXTRACTION_TOKEN_THRESHOLD}). Will extract on next turnComplete.`,
+        `[${this.sessionId}] ContextManager: token delta threshold reached (delta=${delta}, total=${totalInput}, lastSwitch=${this.lastSwitchTokenCount}, threshold=${MEMORY_EXTRACTION_TOKEN_THRESHOLD}). Will extract on next turnComplete.`,
       );
     }
   }
@@ -158,6 +165,10 @@ export class ContextManager extends EventEmitter<ContextManagerEvents> {
   buildInjectionPayload(): InjectionPayload | null {
     if (!this.currentState) return null;
 
+    // Ensure the buffer tail is a model message so the new session
+    // doesn't interpret the last user message as a pending request.
+    this.ensureBufferEndsWithModel();
+
     const bufferText = this.unprocessedBuffer.join('\n').trim();
     const systemInstruction = this.assembleSystemInstruction(this.currentState, bufferText);
 
@@ -169,12 +180,16 @@ export class ContextManager extends EventEmitter<ContextManagerEvents> {
   }
 
   /** Reset state after a successful WebSocket switch. */
-  onWebSocketSwitched(): void {
+  onWebSocketSwitched(currentTokenCount: number): void {
+    this.lastSwitchTokenCount = currentTokenCount;
     this.extractionSucceeded = false;
     this.extractionFlaggedForNextTurn = false;
     this.bufferingSinceExtraction = false;
     this.unprocessedBuffer = [];
     // Keep transcript and currentState — they persist across switches.
+    console.log(
+      `[${this.sessionId}] ContextManager: switch complete. lastSwitchTokenCount updated to ${currentTokenCount}.`,
+    );
   }
 
   /** Whether the manager has a compact state ready for injection. */
@@ -255,8 +270,9 @@ INSTRUCTIONS:
       this.extractionSucceeded = true;
 
       console.log(
-        `[${this.sessionId}] ContextManager: extraction succeeded. State keys: ${Object.keys(this.currentState).join(', ')}`,
+        `[${this.sessionId}] ContextManager: extraction succeeded. Extracted state:`,
       );
+      console.log(JSON.stringify(this.currentState, null, 2));
 
       this.emit('extractionDone', true);
     } catch (err) {
@@ -272,6 +288,24 @@ INSTRUCTIONS:
   }
 
   // ── Injection assembly ───────────────────────────────────────────────────
+
+  /**
+   * Ensures the buffer ends with a model message so Gemini sees a completed
+   * turn and waits for new user input instead of regenerating a response.
+   * If the last entry is a user message, we append a placeholder.
+   */
+  private ensureBufferEndsWithModel(): void {
+    if (this.unprocessedBuffer.length === 0) return;
+
+    const last = this.unprocessedBuffer[this.unprocessedBuffer.length - 1];
+    // Buffer entries are formatted as "[role]: text"
+    if (last.startsWith('[user]')) {
+      // The model hasn't responded yet — the switch fires at turnComplete,
+      // so normally this shouldn't happen. But as a safety net, append a
+      // synthetic marker so the new session doesn't re-answer the last query.
+      this.unprocessedBuffer.push('[model]: (risposta in corso, interrotta dallo switch di sessione)');
+    }
+  }
 
   private assembleSystemInstruction(
     state: AnyAssistantState,
@@ -290,7 +324,7 @@ INSTRUCTIONS:
     // 3. Unprocessed buffer (recent context bridge)
     if (bufferText) {
       sections.push(
-        `\n---\n## RECENT CONTEXT (Unprocessed Buffer)\nThe following are the most recent exchanges that happened after the memory snapshot above was created. Treat them as the immediate conversation context.\n\n${bufferText}`,
+        `\n---\n## RECENT CONTEXT (Already Delivered)\nThe following exchanges already happened — the user has already received these responses. This is provided ONLY for your context. Do NOT repeat, paraphrase, or re-deliver any of these responses. Simply continue the conversation from where it left off, waiting for the user's next input.\n\n${bufferText}`,
       );
     }
 
