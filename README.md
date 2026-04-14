@@ -21,6 +21,46 @@ Inizialmente, l'invio continuo di streaming audio al server creava problemi di l
 * **Come funziona:** Il browser ascolta il microfono in locale e riconosce quando l'utente inizia e finisce di parlare.
 * **Vantaggio:** Vengono inviati al server tramite WebSocket (o endpoint API) solo i pacchetti audio contenenti effettivamente la voce dell'utente. Questo riduce drasticamente il traffico di rete, i tempi di attesa e i costi di elaborazione inutile.
 
+## Perche VAD Client + VAD Gemini (Ibrido)
+
+Nel progetto sono stati testati due approcci:
+
+1. invio continuo del microfono al server e delega completa al VAD interno di Gemini
+2. gating lato browser con Silero, mantenendo comunque il VAD interno di Gemini attivo lato modello
+
+La soluzione finale e stata la n.2 (ibrida) per motivi pratici.
+
+### Perche non basta solo il VAD integrato di Gemini
+
+Con solo VAD server/model-side, il browser continua a streammare frame audio anche quando l'utente e in silenzio. Questo comporta:
+
+* maggiore traffico WebSocket client→server
+* maggiore lavoro di buffering e inoltro lato backend
+* meno controllo applicativo sui turni di parlato (inizio/fine turno gestiti solo lato modello)
+
+In altre parole, il VAD di Gemini decide bene "quando trattare il parlato", ma non impedisce da solo l'upload continuo dal browser.
+
+### Come funziona il meccanismo completo
+
+1. **Silero in browser (gate di upload):**
+   Il client usa `silero_vad_legacy.onnx` (WebAssembly) per decidere quando l'utente sta parlando.
+
+2. **Invio audio solo quando serve:**
+   Durante speech detection il client invia i chunk `audio_chunk`; nei periodi di silenzio evita di inviare frame inutili.
+
+3. **Gemini Live VAD (turn management):**
+   Una volta ricevuto audio valido, Gemini continua a fare VAD lato modello per interruption handling, gestione del turno e trascrizione realtime.
+
+4. **Segnali di interruzione del modello:**
+   Quando Gemini segnala `serverContent.interrupted`, il server lo intercetta e lo inoltra alla GUI per distinguere chiaramente gli eventi VAD lato modello da quelli locali Silero.
+
+### Risultato operativo
+
+* **Silero:** riduce upload/rumore lato client
+* **Gemini VAD:** mantiene robusta la gestione conversazionale lato modello
+
+Questa combinazione fornisce sia efficienza di trasporto sia qualita di interazione.
+
 ## Gestione Sessione e Ottimizzazione Costi
 
 Il mantenimento del contesto conversazionale richiede un'attenzione particolare, gestita tramite `sessionHandler.ts` e `sessionCostTracker.ts`.

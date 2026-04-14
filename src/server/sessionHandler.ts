@@ -10,6 +10,7 @@
 //   Browser → Server  { type: 'audio_chunk', data: string }   ← base64 Int16 PCM, 16kHz mono
 //   Browser → Server  { type: 'text_prompt', text: string }
 //   Server  → Browser { type: 'transcript', role: 'user'|'model', text: string }
+//   Server  → Browser { type: 'vad_event', source: 'silero'|'gemini', message: string }
 //   Server  → Browser { type: 'status',     message: string }
 //   Server  → Browser { type: 'error',      message: string }
 //   Server  → Browser { type: 'tts_audio',  data: string }    ← base64 Int16 PCM, 24kHz mono
@@ -497,8 +498,13 @@ export class SessionHandler {
         }
 
         // ── Log VAD interruptions ──────────────────────────────────────────
-        if (data?.serverContent?.interrupted === true) {
+        if (data?.serverContent?.interrupted === true) { // GEMINI VAD interruption (gemini heard )
           console.warn(`[${this.sessionId}] VAD interruption detected`);
+          this.sendJSON({
+            type: 'vad_event',
+            source: 'gemini',
+            message: 'Interruzione rilevata dal VAD di Gemini (serverContent.interrupted=true).',
+          });
         }
 
       } catch {
@@ -804,7 +810,7 @@ export class SessionHandler {
       return `Usa search_documents adesso per capire l'argomento principale del documento. Poi presentati in modo amichevole e informale, dì cosa hai trovato e chiedi allo studente su cosa vuole lavorare oggi — se vuole capire meglio qualcosa, ripassare, o fare domande.`;
 
     case 'audioguide':
-      return `Usa search_documents adesso per identificare il museo, il sito, le opere o i reperti presenti nel documento. Poi dai il benvenuto al visitatore in modo evocativo e narrativo, presentando brevemente il percorso che farete insieme. Chiedi se è pronto per iniziare.`;
+      return `Usa search_documents adesso per identificare il museo, il sito, le opere o i reperti presenti nel documento. Poi dai il benvenuto al visitatore in modo evocativo e narrativo, presentando brevemente il percorso che farete insieme. Chiedi se è pronto per iniziare. Durante la visita, quando l'utente cita un'opera specifica, verifica sempre con search_documents prima di dire che non esiste nel materiale.`;
 
     case 'immigration_assistant':
       return `Presentati in modo semplice e rassicurante. Usa frasi corte e paratattiche.`;

@@ -587,6 +587,41 @@
         background: rgba(239,68,68,0.04);
       }
 
+      .log-line.vad-silero {
+        color: #34d399;
+        border-left-color: rgba(52, 211, 153, 0.45);
+        background: rgba(52, 211, 153, 0.07);
+      }
+
+      .log-line.vad-gemini {
+        color: #38bdf8;
+        border-left-color: rgba(56, 189, 248, 0.45);
+        background: rgba(56, 189, 248, 0.07);
+      }
+
+      .vad-badge {
+        display: inline-block;
+        font-size: 0.58rem;
+        font-weight: 700;
+        letter-spacing: 0.1em;
+        padding: 1px 6px;
+        border-radius: 3px;
+        margin-right: 6px;
+        text-transform: uppercase;
+      }
+
+      .vad-badge.silero {
+        background: rgba(52, 211, 153, 0.18);
+        border: 1px solid rgba(52, 211, 153, 0.35);
+        color: #34d399;
+      }
+
+      .vad-badge.gemini {
+        background: rgba(56, 189, 248, 0.18);
+        border: 1px solid rgba(56, 189, 248, 0.35);
+        color: #38bdf8;
+      }
+
       .empty-state {
         color: var(--muted);
         font-size: 0.7rem;
@@ -808,11 +843,17 @@
 
       const PLAYBACK_SAMPLE_RATE = 24000;
       const MIC_SAMPLE_RATE = 16000;
+      const SILERO_POSITIVE_SPEECH_THRESHOLD = 0.9;
+      const SILERO_NEGATIVE_SPEECH_THRESHOLD = 0.4;
+      const SILERO_MIN_SPEECH_MS = 180;
+      const TTS_SUPPRESSION_AFTER_INTERRUPTION_MS = 900; // this is  
       let playbackCtx = null;
       let nextPlaybackTime = 0;
       const activePlaybackSources = new Set();
       const TRANSCRIPT_MERGE_WINDOW_MS = 1400;
       let lastTranscriptEntry = null;
+      let ttsSuppressionUntilMs = 0;
+      let ttsSuppressionDropCount = 0;
 
       // ── Robot animation ──────────────────────────────────────────────────────
       function setRobotSpeaking(speaking) {
@@ -919,6 +960,19 @@
         const el = document.createElement('div');
         el.className = 'log-line rag';
         el.innerHTML = `<span class="rag-badge">RAG</span>${text}`;
+        systemLog.appendChild(el);
+        systemLog.scrollTop = systemLog.scrollHeight;
+      }
+
+      function logVad(source, message) {
+        systemEmpty.style.display = 'none';
+        const normalized = source === 'gemini' ? 'gemini' : 'silero';
+        const className = normalized === 'gemini' ? 'vad-gemini' : 'vad-silero';
+        const badge = normalized === 'gemini' ? 'GEMINI VAD' : 'SILERO VAD';
+
+        const el = document.createElement('div');
+        el.className = `log-line ${className}`;
+        el.innerHTML = `<span class="vad-badge ${normalized}">${badge}</span>${message}`;
         systemLog.appendChild(el);
         systemLog.scrollTop = systemLog.scrollHeight;
       }
@@ -1045,7 +1099,30 @@
         setRobotSpeaking(false);
       }
 
+      function suppressTtsForInterruption(source, message, durationMs = TTS_SUPPRESSION_AFTER_INTERRUPTION_MS) {
+        stopAndClearPlayback();
+        ttsSuppressionUntilMs = Math.max(ttsSuppressionUntilMs, Date.now() + durationMs);
+        ttsSuppressionDropCount = 0;
+        logVad(source, message);
+      }
+
+      function shouldDropIncomingTtsChunk() {
+        if (Date.now() < ttsSuppressionUntilMs) {
+          ttsSuppressionDropCount += 1;
+          return true;
+        }
+
+        if (ttsSuppressionUntilMs !== 0 && ttsSuppressionDropCount > 0) {
+          logSystem(`TTS guard: scartati ${ttsSuppressionDropCount} chunk residui dopo interruzione.`);
+          ttsSuppressionDropCount = 0;
+        }
+
+        ttsSuppressionUntilMs = 0;
+        return false;
+      }
+
       function enqueueTtsAudio(b64data) {
+        if (shouldDropIncomingTtsChunk()) return;
         const arrayBuffer = base64ToArrayBuffer(b64data);
         const byteLen = arrayBuffer.byteLength % 2 !== 0 ? arrayBuffer.byteLength - 1 : arrayBuffer.byteLength;
         const int16 = new Int16Array(arrayBuffer, 0, byteLen / 2);
@@ -1074,6 +1151,8 @@
       }
 
       function stopMicCapture() {
+        ttsSuppressionUntilMs = 0;
+        ttsSuppressionDropCount = 0;
         if (micVad) { void micVad.destroy(); micVad = null; }
       }
 
@@ -1084,15 +1163,17 @@
           startOnLoad: false,
           baseAssetPath: '/',
           onnxWASMBasePath: '/',
-          positiveSpeechThreshold: 0.85,
-          negativeSpeechThreshold: 0.35,
-          minSpeechMs: 96,
+          positiveSpeechThreshold: SILERO_POSITIVE_SPEECH_THRESHOLD,
+          negativeSpeechThreshold: SILERO_NEGATIVE_SPEECH_THRESHOLD,
+          minSpeechMs: SILERO_MIN_SPEECH_MS,
           preSpeechPadMs: 160,
           redemptionMs: 900,
-          onSpeechStart: () => {
+          onSpeechRealStart: () => {
             if (activePlaybackSources.size > 0) {
-              stopAndClearPlayback();
-              logSystem('VAD: speech detected — playback interrupted.');
+              suppressTtsForInterruption(
+                'silero',
+                'Speech reale rilevato da Silero: riproduzione interrotta.',
+              );
             }
           },
           onFrameProcessed: (_probabilities, audioFrame) => {
@@ -1192,6 +1273,16 @@
               'cost'
             );
             setStatus(hasPricing ? `Session cost: ${totalCost}` : 'Session ended.', '');
+          }
+
+          if (msg.type === 'vad_event') {
+            const source = String(msg.source ?? 'gemini').toLowerCase();
+            const detail = String(msg.message ?? 'Evento VAD rilevato lato modello.');
+            if (source === 'gemini') {
+              suppressTtsForInterruption('gemini', detail, 1200);
+            } else {
+              logVad('silero', detail);
+            }
           }
 
           if (msg.type === 'tts_audio' && msg.data) {
