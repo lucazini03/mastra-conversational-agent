@@ -27,17 +27,19 @@ Il mantenimento del contesto conversazionale richiede un'attenzione particolare,
 
 * **Il Problema:** Nelle conversazioni lunghe, il costo (in termini di token) aumenta in modo quasi esponenziale o lineare ripido, poiché a ogni nuovo scambio l'LLM deve riprocessare tutto il contesto storico precedente.
 * **Soluzioni da testare:**
-    1.  **Summarization Injection:** Invece di mantenere lo storico completo dei messaggi, dopo un certo numero di botta-e-risposta il server elabora un riassunto della conversazione. Il contesto viene svuotato e sostituito con questo riassunto compatto.
-    2.  **Limitazione delle sessioni:** Lato UX/UI, si progetta l'interazione per essere focalizzata su "micro-esperienze" per risolvere il bisogno dell'utente in pochi scambi mirati, evitando sessioni infinite.
+    1.  **Summarization Injection:** Invece di mantenere lo storico completo dei messaggi, dopo un certo numero di botta-e-risposta il server elabora un riassunto testuale della conversazione grazie alle trascrizioni automatiche che Gemini offre (seppur di scarsa qualità e spesso contenenti errori). Al contesto viene aggiunto questo riassunto, e poi si applica `contextCompression=true` per tagliare il contesto ad un determinato numero di token massimi (in modo che non crescano a dismisura).
+    2.  **Limitazione delle sessioni:** Lato UX/UI, si potrebbe progettare l'interazione per essere focalizzata su "micro-esperienze" per risolvere il bisogno dell'utente in pochi scambi mirati, evitando sessioni molto lunghe (e molto costose).
 
 ## Flessibilità degli Agenti e Use Case
 
 Il sistema è altamente modulare (`src/agent/agentFactory.ts`). Modificando i file di configurazione (come `professorConfig.ts`), è possibile cambiare radicalmente la personalità, le istruzioni di sistema e la base di conoscenza (RAG) dell'agente.
 
 Questo permette di testare e distribuire l'assistente per scenari completamente diversi:
+* Professore che simula un interrogazione
+* Responsabile HR che simula un colloquio di lavoro
 * Tutor per l'apprendimento delle lingue
 * Guida museale
-* Assistente aziendale per onboarding
+* Piattaforma per migranti
 
 ## Struttura del Progetto
 
