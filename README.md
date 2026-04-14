@@ -1,105 +1,62 @@
-# Il Professore — Italian Language Tutor (Mastra + Gemini Live STS)
+# Agente Conversazionale Vocale
 
-A real-time conversational Italian language tutor using **true speech-to-speech**:
-browser microphone → Gemini Live API → browser speaker, with ~500ms latency.
+Questo progetto implementa un assistente vocale interattivo basato sul framework Mastra, integrato con modelli LLM (Gemini) e un sistema RAG (Retrieval-Augmented Generation) basato su DuckDB. L'infrastruttura è progettata per gestire conversazioni audio bidirezionali in tempo reale dal browser.
 
-## Architecture
+## 🏗️ Architettura e Stack Tecnologico
 
-```
-Browser (mic) ──PCM Int16──► WebSocket Server
-                                    │
-                             SessionHandler
-                             (one per user)
-                                    │
-                           createProfessorAgent()
-                           (factory — isolated per user)
-                                    │
-                            GeminiLiveVoice
-                            (persistent WebSocket
-                             to Google Live API)
-                                    │
-                             Gemini 2.0 Flash Live
-                             (audio in → audio out,
-                              no STT/TTS pipeline)
-                                    │
-Browser (speaker) ◄─PCM Int16── WebSocket Server
-```
+Il progetto è diviso in un backend Node.js/TypeScript e un frontend web leggero.
 
-**Why a factory and not a singleton?**  
-`GeminiLiveVoice` holds a stateful WebSocket. If you used a singleton agent,
-all users would share the same audio stream. The factory pattern creates a
-completely isolated `Agent + GeminiLiveVoice` pair per browser connection.
+* **Core Framework:** Mastra (gestione degli agenti, dei flussi e dell'integrazione LLM).
+* **LLM:** Gemini (elaborazione del linguaggio naturale e generazione delle risposte).
+* **Database / RAG:** DuckDB. Utilizzato per vettorializzare e recuperare documenti di contesto (es. manuali, guide) da fornire all'agente prima della generazione della risposta.
+* **Frontend:** Interfaccia web pura (HTML/JS) per l'acquisizione del microfono e la riproduzione dell'audio generato.
 
-## Project Structure
+## 🎙️ Flusso Audio e VAD (Voice Activity Detection)
 
-```
-professor-sts/
-├── src/
-│   ├── config/
-│   │   └── professorConfig.ts     # Persona instructions + voice settings
-│   ├── agent/
-│   │   └── professorFactory.ts    # Factory: creates one agent per user
-│   ├── server/
-│   │   ├── index.ts               # Express + WebSocket server
-│   │   └── sessionHandler.ts      # Per-connection audio routing
-│   └── client/
-│       └── cli.ts                 # Terminal test (no browser needed)
-├── public/
-│   └── index.html                 # Browser demo UI
-├── .env.example
-├── package.json
-└── tsconfig.json
-```
+Una delle sfide principali dell'interazione vocale via browser è la gestione continua del flusso audio.
 
-## Setup
+**Scelta Tecnica: VAD Lato Client (Silero)**
+Inizialmente, l'invio continuo di streaming audio al server creava problemi di latenza e spreco di risorse. Si è optato per un approccio **VAD lato client** utilizzando `silero_vad_legacy.onnx` eseguito tramite WebAssembly (`ort.min.js`).
 
-### 1. Get a Google API Key
+* **Come funziona:** Il browser ascolta il microfono in locale e riconosce quando l'utente inizia e finisce di parlare.
+* **Vantaggio:** Vengono inviati al server tramite WebSocket (o endpoint API) solo i pacchetti audio contenenti effettivamente la voce dell'utente. Questo riduce drasticamente il traffico di rete, i tempi di attesa e i costi di elaborazione inutile.
 
-Go to [Google AI Studio](https://makersuite.google.com/app/apikey) and create an API key.
-Make sure the **Generative Language API** is enabled for your project.
+## 💰 Gestione Sessione e Ottimizzazione Costi
 
-### 2. Install and configure
+Il mantenimento del contesto conversazionale richiede un'attenzione particolare, gestita tramite `sessionHandler.ts` e `sessionCostTracker.ts`.
 
-```bash
-cd professor-sts
-npm install
-cp .env.example .env
-# Edit .env and paste your GOOGLE_API_KEY
-```
+* **Il Problema:** Nelle conversazioni lunghe, il costo (in termini di token) aumenta in modo quasi esponenziale o lineare ripido, poiché a ogni nuovo scambio l'LLM deve riprocessare tutto il contesto storico precedente.
+* **Soluzioni in fase di test:**
+    1.  **Summarization Injection:** Invece di mantenere lo storico completo dei messaggi, dopo un certo numero di botta-e-risposta il server elabora un riassunto della conversazione. Il contesto viene svuotato e sostituito con questo riassunto compatto.
+    2.  **Limitazione delle sessioni:** Lato UX/UI, si progetta l'interazione per essere focalizzata su "micro-esperienze" per risolvere il bisogno dell'utente in pochi scambi mirati, evitando sessioni infinite.
 
-### 3. Run
+## 🧠 Flessibilità degli Agenti e Use Case
 
-```bash
-# Start the server + browser UI
-npm run dev
+Il sistema è altamente modulare (`src/agent/agentFactory.ts`). Modificando i file di configurazione (come `professorConfig.ts`), è possibile cambiare radicalmente la personalità, le istruzioni di sistema e la base di conoscenza (RAG) dell'agente.
 
-# Then open: http://localhost:3000
-```
+Questo permette di testare e distribuire l'assistente per scenari completamente diversi:
+* Tutor per l'apprendimento delle lingue
+* Guida museale
+* Assistente aziendale per onboarding
 
-### 4. (Optional) Terminal-only test
+## 📂 Struttura del Progetto
 
-If you want to test from the command line without a browser:
+* `src/server/`: Logica backend (Express/WebSockets, tracking costi, servizi RAG, handler di sessione).
+* `src/agent/`: Fabbrica e configurazione degli agenti Mastra.
+* `src/config/`: Prompts di sistema e parametri specifici per i vari ruoli dell'agente.
+* `public/`: File serviti al client, incluso HTML, logica di acquisizione microfono e modelli VAD compilati (ONNX/WASM).
+* `rag-docs/`: Directory contenente i documenti PDF o testuali che vengono ingeriti nel database DuckDB per il RAG.
 
-```bash
-npm run test:cli
-```
+## 🚀 Setup e Avvio Locale
 
-This streams your microphone directly to Gemini Live and plays back audio
-through your speakers. Press `Ctrl+C` to quit.
+1. Installa le dipendenze:
+   ```bash
+   npm installs
+       ```
 
-## Voice Options
+2. Avvia il server:
+   ```bash
+   npm run dev
+   ```
 
-Edit `src/config/professorConfig.ts` to change:
-
-| Field | Options |
-|-------|---------|
-| `model` | `gemini-2.0-flash-live-001` (stable), `gemini-live-2.5-flash-preview` (latest) |
-| `speaker` | `Kore`, `Puck`, `Charon`, `Fenrir` |
-
-## Notes
-
-- The browser captures mic at **16kHz PCM** (what Gemini Live expects as input).
-- Gemini outputs **24kHz PCM**, which the browser plays back directly.
-- Interruptions work out of the box — you can cut off the professor mid-sentence.
-- For production/multi-user: switch to Vertex AI auth (see `professorConfig.ts` comments).
-# mastra-conversational-agent
+3. Apri il browser su `http://localhost:3000` e inizia a parlare con l'agente!
