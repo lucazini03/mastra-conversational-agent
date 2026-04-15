@@ -9,3 +9,10 @@ dist
 *.db-*
 .netlify
 .vercel
+
+# Session file logs (auto-generated, not for version control)
+logs/
+
+#remove folders rag-docs
+rag-docs
+rag-docs-not-active

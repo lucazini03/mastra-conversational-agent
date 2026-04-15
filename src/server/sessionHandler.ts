@@ -25,6 +25,7 @@ import {
 } from '../config/professorConfig.js';
 import { browserRagService } from './ragService.js';
 import { SessionCostTracker } from './sessionCostTracker.js';
+import { SessionLogger } from './sessionLogger.js';
 import { ContextManager, type InjectionPayload } from '../services/contextManager/index.js';
 
 // How long to wait before attempting a reconnect after Google drops the line.
@@ -53,6 +54,9 @@ export class SessionHandler {
 
   // ── Context Compaction (Observational Memory) ─────────────────────────────
   private contextManager: ContextManager | null = null;
+
+  // ── Session file logger ───────────────────────────────────────────────────
+  private sessionLogger: SessionLogger | null = null;
 
   // ── Session Resumption state ─────────────────────────────────────────────
   // Google sends sessionResumptionUpdate messages throughout the session.
@@ -223,6 +227,9 @@ export class SessionHandler {
     });
     this.contextManager.on('switchReady', (payload) => this.handleContextSwitch(payload));
 
+    // Initialise session file logger (writes to logs/sessions/ on teardown).
+    this.sessionLogger = new SessionLogger(this.sessionId, this.selectedAssistantId);
+
     await this.connectToGemini(false);
   }
 
@@ -323,6 +330,8 @@ export class SessionHandler {
         if (role === 'user' || role === 'model') {
           this.contextManager?.addTranscriptEntry(role, text);
         }
+        // 'assistant' is the SDK role name for model turns; normalize for the logger.
+        this.sessionLogger?.addTranscriptLine(role === 'user' ? 'user' : 'model', text);
       });
 
       voice.on('toolCall', ({ name, args, id }: { name: string; args: unknown; id: string }) => {
@@ -360,6 +369,11 @@ export class SessionHandler {
 
       this.reconnectAttempts = 0;
       this.isReconnecting = false;
+      // Open a new log episode for this WebSocket connection.
+      this.sessionLogger?.startEpisode(
+        isReconnect ? 'reconnect' : 'initial_connection',
+        this.costTracker.getFullTokenSnapshot(),
+      );
 
       this.flushPendingTextPrompts(voice);
 
@@ -448,6 +462,8 @@ export class SessionHandler {
     console.log(
       `[${this.sessionId}] Context switch: injecting compact state + buffer (${payload.unprocessedBuffer.length} chars) into new WebSocket.`,
     );
+    // Record the compact state against the outgoing episode before the new one opens.
+    this.sessionLogger?.recordCompactState(payload.compactState, payload.extractionModel);
     this.sendStatus('Ottimizzazione della memoria in corso...');
 
     await this.connectToGeminiWithContext(payload);
@@ -519,6 +535,7 @@ export class SessionHandler {
         if (role === 'user' || role === 'model') {
           this.contextManager?.addTranscriptEntry(role, text);
         }
+        this.sessionLogger?.addTranscriptLine(role === 'user' ? 'user' : 'model', text);
       });
 
       voice.on('toolCall', ({ name, args, id }: { name: string; args: unknown; id: string }) => {
@@ -550,6 +567,8 @@ export class SessionHandler {
       // Tell ContextManager the switch succeeded — snapshot token count for delta threshold.
       const snap = this.costTracker.getInputTokenSnapshot();
       this.contextManager?.onWebSocketSwitched(snap.inputText + snap.inputAudio);
+      // Open the new log episode (this also closes the outgoing episode with the same snapshot).
+      this.sessionLogger?.startEpisode('context_switch', this.costTracker.getFullTokenSnapshot());
 
       this.sendStatus('Memoria ottimizzata. La conversazione continua.');
       console.log(`[${this.sessionId}] Context switch completed successfully.`);
@@ -753,6 +772,8 @@ export class SessionHandler {
 
     this.sendJSON({ type: 'transcript', role, text });
     this.contextManager?.addTranscriptEntry(role, text);
+    // Audio transcriptions are the primary transcript source in voice mode.
+    this.sessionLogger?.addTranscriptLine(role, text);
   }
 
   private mirrorAutomaticTranscriptions(data: any) {
@@ -830,6 +851,7 @@ export class SessionHandler {
                 scores: scoredSources.map((s) => ({ file: s.file, score: s.score })),
               };
               this.costTracker.recordRagUsage(toolResult);
+              this.sessionLogger?.recordRagCall(query, sources, Math.max(1, Math.ceil(JSON.stringify(toolResult).length / 4)));
               return toolResult;
             }
             this.sendStatus('RAG: nessuna corrispondenza trovata.');
@@ -839,6 +861,7 @@ export class SessionHandler {
               scores: scoredSources.map((s) => ({ file: s.file, score: s.score })),
             };
             this.costTracker.recordRagUsage(toolResult);
+            this.sessionLogger?.recordRagCall(query, sources, Math.max(1, Math.ceil(JSON.stringify(toolResult).length / 4)));
             return toolResult;
           }
 
@@ -849,6 +872,7 @@ export class SessionHandler {
             scores: scoredSources.map((s) => ({ file: s.file, score: s.score })),
           };
           this.costTracker.recordRagUsage(toolResult);
+          this.sessionLogger?.recordRagCall(query, sources, Math.max(1, Math.ceil(JSON.stringify(toolResult).length / 4)));
           return toolResult;
         },
       },
@@ -858,6 +882,16 @@ export class SessionHandler {
   // ─── Cleanup ─────────────────────────────────────────────────────────────────
 
   private async cleanup() {
+    // ── Session file log ───────────────────────────────────────────────────
+    // Close the current episode with a final token snapshot and trigger async
+    // file write. We null-out the reference immediately so no new data is added
+    // after finalization, then await the write at the very end of cleanup.
+    const finalTokenSnap = this.costTracker.getFullTokenSnapshot();
+    this.sessionLogger?.closeCurrentEpisode(finalTokenSnap);
+    const { summary: finalCostSummary } = this.costTracker.getSummary();
+    const sessionLogPromise = this.sessionLogger?.finalizeSession(finalCostSummary) ?? Promise.resolve();
+    this.sessionLogger = null;
+
     this.emitSessionCostSummary();
 
     this.pendingMicByte = null;
@@ -881,6 +915,9 @@ export class SessionHandler {
       this.professor = null;
       console.log(`[${this.sessionId}] Professor agent destroyed`);
     }
+
+    // Wait for the session log file to finish writing.
+    await sessionLogPromise;
   }
 
   private emitSessionCostSummary() {

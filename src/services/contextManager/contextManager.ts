@@ -28,6 +28,8 @@ const MEMORY_EXTRACTION_TOKEN_THRESHOLD = parseInt(
 );
 
 const MEMORY_EXTRACTION_MODEL = process.env.MEMORY_EXTRACTION_MODEL ?? 'gemini-2.5-flash';
+const MEMORY_EXTRACTION_MODEL_BACKUP =
+  process.env.MEMORY_EXTRACTION_MODEL_BACKUP ?? 'gemini-2.0-flash';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -49,6 +51,8 @@ export interface InjectionPayload {
   compactState: AnyAssistantState;
   /** Raw unprocessed text that happened after extraction started. */
   unprocessedBuffer: string;
+  /** The model name that successfully produced the extraction (null if unknown). */
+  extractionModel: string | null;
 }
 
 export interface ContextManagerEvents {
@@ -75,6 +79,7 @@ export class ContextManager extends EventEmitter<ContextManagerEvents> {
   private extractionInProgress = false;
   private extractionSucceeded = false;
   private extractionFlaggedForNextTurn = false;
+  private lastSuccessfulExtractionModel: string | null = null;
 
   // ── Threshold delta tracking (Bug 2 fix) ─────────────────────────────────
   // Token count at the time of the last successful switch. The next extraction
@@ -165,10 +170,6 @@ export class ContextManager extends EventEmitter<ContextManagerEvents> {
   buildInjectionPayload(): InjectionPayload | null {
     if (!this.currentState) return null;
 
-    // Ensure the buffer tail is a model message so the new session
-    // doesn't interpret the last user message as a pending request.
-    this.ensureBufferEndsWithModel();
-
     const bufferText = this.unprocessedBuffer.join('\n').trim();
     const systemInstruction = this.assembleSystemInstruction(this.currentState, bufferText);
 
@@ -176,6 +177,7 @@ export class ContextManager extends EventEmitter<ContextManagerEvents> {
       systemInstruction,
       compactState: this.currentState,
       unprocessedBuffer: bufferText,
+      extractionModel: this.lastSuccessfulExtractionModel,
     };
   }
 
@@ -252,59 +254,75 @@ INSTRUCTIONS:
 - If the existing state is null, create it from scratch based on the delta.
 - Always preserve and update behavioral_directives with any new observations about user preferences, tone, or requests.
 - Be concise: use short phrases, not full sentences.
-- Only include information that is explicitly present in the conversation.`;
+- Only include information that is explicitly present in the conversation.
+- Include all relevant details that could help maintain context in future turns, but do NOT add any assumptions or information not directly supported by the transcript.`;
 
-    try {
-      console.log(
-        `[${this.sessionId}] ContextManager: extracting state from ${deltaEntries.length} turns (turns ${this.lastExtractionTurnIndex + 1}..${lastTurnIndex})...`,
-      );
+    const modelCandidates = [MEMORY_EXTRACTION_MODEL, MEMORY_EXTRACTION_MODEL_BACKUP].filter(
+      (value, index, all) => value.trim().length > 0 && all.indexOf(value) === index,
+    );
 
-      const { object } = await generateObject({
-        model: google(MEMORY_EXTRACTION_MODEL),
-        schema,
-        prompt: extractionPrompt,
-      });
+    let extractedObject: AnyAssistantState | null = null;
+    let lastError: unknown = null;
 
-      this.currentState = object as AnyAssistantState;
-      this.lastExtractionTurnIndex = lastTurnIndex;
-      this.extractionSucceeded = true;
+    for (const modelName of modelCandidates) {
+      try {
+        console.log(
+          `[${this.sessionId}] ContextManager: extracting state from ${deltaEntries.length} turns (turns ${this.lastExtractionTurnIndex + 1}..${lastTurnIndex}) using ${modelName}...`,
+        );
 
-      console.log(
-        `[${this.sessionId}] ContextManager: extraction succeeded. Extracted state:`,
-      );
-      console.log(JSON.stringify(this.currentState, null, 2));
+        const { object } = await generateObject({
+          model: google(modelName),
+          schema,
+          prompt: extractionPrompt,
+        });
 
-      this.emit('extractionDone', true);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(`[${this.sessionId}] ContextManager: extraction failed:`, message);
+        extractedObject = object as AnyAssistantState;
+        this.lastSuccessfulExtractionModel = modelName;
+        console.log(`[${this.sessionId}] ContextManager: extraction succeeded with ${modelName}.`);
+        break;
+      } catch (err) {
+        lastError = err;
+        const message = err instanceof Error ? err.message : String(err);
+        console.warn(`[${this.sessionId}] ContextManager: extraction failed with ${modelName}: ${message}`);
+      }
+    }
+
+    if (!extractedObject) {
+      const message = lastError instanceof Error ? lastError.message : String(lastError ?? 'Unknown extraction error');
+      console.error(`[${this.sessionId}] ContextManager: extraction failed with all models: ${message}`);
 
       // Don't block future extractions — allow retry on next threshold cross.
       this.extractionFlaggedForNextTurn = false;
       this.emit('extractionDone', false, message);
-    } finally {
       this.extractionInProgress = false;
+      return;
     }
+
+    this.currentState = extractedObject;
+    this.lastExtractionTurnIndex = lastTurnIndex;
+    this.extractionSucceeded = true;
+
+    console.log(
+      `[${this.sessionId}] ContextManager: extraction succeeded. Extracted state:`,
+    );
+    console.log(JSON.stringify(this.currentState, null, 2));
+
+    this.emit('extractionDone', true);
+    this.extractionInProgress = false;
   }
 
   // ── Injection assembly ───────────────────────────────────────────────────
 
   /**
-   * Ensures the buffer ends with a model message so Gemini sees a completed
-   * turn and waits for new user input instead of regenerating a response.
-   * If the last entry is a user message, we append a placeholder.
+   * The switch should only fire once the buffer ends on a completed assistant
+   * turn. That prevents the new session from interpreting a dangling user
+   * request as a fresh prompt and repeating the last answer.
    */
-  private ensureBufferEndsWithModel(): void {
-    if (this.unprocessedBuffer.length === 0) return;
+  private hasCompletedAssistantTail(): boolean {
+    if (this.unprocessedBuffer.length === 0) return true;
 
     const last = this.unprocessedBuffer[this.unprocessedBuffer.length - 1];
-    // Buffer entries are formatted as "[role]: text"
-    if (last.startsWith('[user]')) {
-      // The model hasn't responded yet — the switch fires at turnComplete,
-      // so normally this shouldn't happen. But as a safety net, append a
-      // synthetic marker so the new session doesn't re-answer the last query.
-      this.unprocessedBuffer.push('[model]: (risposta in corso, interrotta dallo switch di sessione)');
-    }
+    return last.startsWith('[model]');
   }
 
   private assembleSystemInstruction(
@@ -334,6 +352,13 @@ INSTRUCTIONS:
   // ── Switch emission ──────────────────────────────────────────────────────
 
   private emitSwitchReady(): void {
+    if (!this.hasCompletedAssistantTail()) {
+      console.log(
+        `[${this.sessionId}] ContextManager: switch deferred until assistant turn is fully buffered.`,
+      );
+      return;
+    }
+
     const payload = this.buildInjectionPayload();
     if (!payload) return;
 

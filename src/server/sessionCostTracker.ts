@@ -108,6 +108,11 @@ export class SessionCostTracker {
     return { inputText: this.usageTotals.inputText, inputAudio: this.usageTotals.inputAudio };
   }
 
+  /** Returns a full snapshot of all four token modality totals (for per-episode delta tracking). */
+  getFullTokenSnapshot(): { inputText: number; inputAudio: number; outputText: number; outputAudio: number } {
+    return { ...this.usageTotals };
+  }
+
   captureUsageMetadata(payload: unknown) {
     const visited = new Set<object>();
     const usageObjects: unknown[] = [];
