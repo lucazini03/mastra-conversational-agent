@@ -542,8 +542,8 @@ export class SessionHandler {
         console.log(`[${this.sessionId}] Tool call: ${name} (id=${id})`, args);
       });
 
-      voice.on('error', (err: { message: string }) => {
-        console.warn(`[${this.sessionId}] Voice error after context switch:`, err.message);
+      voice.on('error', (err: { message: string; code?: string }) => {
+        console.warn(`[${this.sessionId}] Voice error after context switch [${err.code ?? 'unknown'}]:`, err.message);
         if (!this.intentionalClose) this.scheduleReconnect();
       });
 

@@ -1,0 +1,168 @@
+PER CONVERSAZIONI  DI 4 MINUTI:
+
+TEST-VAD-CLAUDE
+[55ae9304] SESSION COST SUMMARY
+[55ae9304] Input Tokens: 40,661 ($0.080153) [text=18,591, audio=22,070]
+[55ae9304] Output Tokens: 2,947 ($0.013261) [text=2,947, audio=0]
+[55ae9304] RAG Tokens (subset of input): 978 (~$0.000733) [calls=1]
+[55ae9304] Growth: sublinear_like (delta input first=1,332, last=0, avg=68, slope/turn=-2.23)
+[55ae9304] Estimated Cost: $0.093415 (duration 4.06 min, usage events 598)
+
+TEST-VAD
+[7ce54b9e] SESSION COST SUMMARY
+[7ce54b9e] Input Tokens: 45,132 ($0.091683) [text=19,428, audio=25,704]
+[7ce54b9e] Output Tokens: 3,383 ($0.015224) [text=3,383, audio=0]
+[7ce54b9e] RAG Tokens (subset of input): 978 (~$0.000733) [calls=1]
+[7ce54b9e] Growth: sublinear_like (delta input first=1,332, last=0, avg=67, slope/turn=-1.99)
+[7ce54b9e] Estimated Cost: $0.106907 (duration 4.20 min, usage events 672)
+
+MAIN
+[500e2b16] SESSION COST SUMMARY
+[500e2b16] Input Tokens: 58,324 ($0.120347) [text=24,278, audio=34,046]
+[500e2b16] Output Tokens: 3,150 ($0.014175) [text=3,150, audio=0]
+[500e2b16] RAG Tokens (subset of input): 978 (~$0.000733) [calls=1]
+[500e2b16] Growth: sublinear_like (delta input first=1,332, last=0, avg=91, slope/turn=-2.07)
+[500e2b16] Estimated Cost: $0.134522 (duration 4.17 min, usage events 644)
+
+
+
+
+
+
+Input Tokens: 19,043 ($0.027946) [text=12,970, audio=6,073]
+[100a90e0] Output Tokens: 1,900 ($0.008550) [text=1,900, audio=0]
+
+[9d69f8d4] Input Tokens: 15,751 ($0.022705) [text=10,910, audio=4,841]
+[9d69f8d4] Output Tokens: 1,652 ($0.007434) [text=1,652, audio=0]
+
+
+GEMINI-CHATGPT CONVERSATION
+Branch main
+Input Tokens: 151,978 ($0.341299) [text=50,949, audio=101,029]
+[4bbddeea] Output Tokens: 3,991 ($0.017959) [text=3,991, audio=0]
+[4bbddeea] RAG Tokens (subset of input): 978 (~$0.000733) [calls=1]
+[4bbddeea] Growth: sublinear_like (delta input first=1,332, last=0, avg=181, slope/turn=-1.59)
+[4bbddeea] Estimated Cost: $0.359258 (duration 6.30 min, usage events 839)
+
+
+Branch test-VAD-risparmio-token:
+[63afcc3d] Input Tokens: 154,302 ($0.348473) [text=50,859, audio=103,443]
+[63afcc3d] Output Tokens: 3,828 ($0.017226) [text=3,828, audio=0]
+[63afcc3d] RAG Tokens (subset of input): 978 (~$0.000733) [calls=1]
+[63afcc3d] Growth: sublinear_like (delta input first=1,332, last=0, avg=191, slope/turn=-1.65)
+[63afcc3d] Estimated Cost: $0.365699 (duration 6.32 min, usage events 808)
+
+test-VAD-claude
+[495cccb3] SESSION COST SUMMARY
+[495cccb3] Input Tokens: 158,310 ($0.357962) [text=51,986, audio=106,324]
+[495cccb3] Output Tokens: 3,335 ($0.015008) [text=3,335, audio=0]
+[495cccb3] RAG Tokens (subset of input): 978 (~$0.000733) [calls=1]
+[495cccb3] Growth: sublinear_like (delta input first=1,332, last=0, avg=215, slope/turn=-1.81)
+[495cccb3] Estimated Cost: $0.372969 (duration 6.33 min, usage events 738)
+
+
+
+test di ieri sera (15 aprile alle 17:21) fatto con chatgpt e con la branch test-context-injection. la chiave è quella del progetto di mastra-conversatoinal-agent,
+verificare se questi costi sono coerenti con quelli riportati dalla dashboard di google
+Context switch completed successfully.
+[ae143623] SESSION COST SUMMARY
+[ae143623] Input Tokens: 20,374 ($0.033058) [text=12,473, audio=7,901]
+[ae143623] Output Tokens: 1,332 ($0.015849) [text=18, audio=1,314]
+[ae143623] RAG Tokens (subset of input): 978 (~$0.000733) [calls=1]
+[ae143623] Growth: sublinear_like (delta input first=1,332, last=0, avg=74, slope/turn=-4.83)
+[ae143623] Estimated Cost: $0.048907 (duration 2.19 min, usage events 277)
+
+test fatto con gemini+chat su test-context-injection. la chiave è quella default.
+[db5c2c75] SESSION COST SUMMARY
+[db5c2c75] Input Tokens: 198,008 ($0.278331) [text=140,308, audio=57,700]
+[db5c2c75] Output Tokens: 7,886 ($0.035487) [text=7,886, audio=0]
+[db5c2c75] RAG Tokens (subset of input): 9,536 (~$0.007152) [calls=6]
+[db5c2c75] Growth: sublinear_like (delta input first=1,205, last=0, avg=131, slope/turn=-0.80)
+[db5c2c75] Estimated Cost: $0.313818 (duration 6.76 min, usage events 1516)
+
+
+
+BUG DA TENERE A MENTE
+- una volta completamente A CASO l'assistente ha pronunciato 'get_content' a metà di una frase. al 99% però è stato un problema di gemini, perchè noi nemmeno abbiamo da nessuna parte dentro al progetto la parola 'get_content'.
+- bug da parte di gemini: non si riescono a contare correttamente i token audio, e quindi prevedere correttamente il costo della sessione
+- Websocket - RECONNECT (Google dropped the line): capire perchè eventualmente scommentando debug:true
+
+
+IDEA: possibile che il motivo per cui usare vad lato client per risparmiare token non risparmiasse davvero token, sia che dobbiamo disattivare la configurazione automatica del vad di gemini? e invece bloccarlo mandandogli un qualche segnale (se esiste) appena il vad locale rileva uno stop? 
+VAD personalizzato (activity_start/activity_end)	Supportato. Disattiva il VAD automatico e invia manualmente i messaggi activityStart e activityEnd per controllare i limiti dei turni.	
+Configurazione automatica del VAD	Supportato. Configura parametri come start_of_speech_sensitivity, end_of_speech_sensitivity, prefix_padding_ms e silence_duration_ms.
+https://ai.google.dev/gemini-api/docs/live-api/capabilities?hl=it
+
+IDEA: quando ci sono task più complesse e fondamentali, magari si può fare tool calling. esempio: se è importante che il voto dell'esame dato dal Professore sia molto realistico, si può creare un tool che fa chiamare un llm testuale passandogli tutto il transcript con lo scopo di generare un voto e un feedback. in questo modo si sopperirebbe un pochino alle lacune dei modelli speech to speech.
+https://ai.google.dev/gemini-api/docs/live-api/best-practices?hl=it IN FONDO ALLA PAGINA
+
+Risposta di claude per il problema delle risposte duplicate quando avviene lo switch della websocket:
+Read [](file:///home/lucazini03/conversational-agent-mastra/src/services/contextManager/contextManager.ts#1-1), lines 1 to 150
+
+Visualizzando il problema nel log in modo preciso: il modello in WS#2 risponde con "Interessante, un background tecnico solido. E come mai questa posizione di Product Manager?" — che è esattamente quello che aveva già detto in WS#1 dopo il primo messaggio dell'utente — invece di reagire a "sono sempre stato bravo a gestire altri".
+
+**Causa radice:** Il buffer dell'unprocessedBuffer viene inserito nel system instruction come testo di sfondo, ma Gemini su una WS fresca **non lo tratta come history conversazionale vera**. Quando riceve l'audio dell'utente, rigenera partendo dallo stato compatto (che dice `interview_phase: motivational`, `questions_asked: 1`) ignorando di fatto il buffer. Il fix corretto è **iniettare il buffer come turn reali di conversazione** via `clientContent` sulla nuova WS, non solo come testo nel system prompt. 
+
+Read [](file:///home/lucazini03/conversational-agent-mastra/src/services/contextManager/contextManager.ts#160-160), lines 160 to 250
+
+Read [](file:///home/lucazini03/conversational-agent-mastra/src/services/contextManager/contextManager.ts#310-310), lines 310 to 372
+
+Now I have everything I need. Let me implement the fix: 
+
+Replacing 40 lines with 66 lines in [](file:///home/lucazini03/conversational-agent-mastra/src/services/contextManager/contextManager.ts)
+
+
+```
+
+```
+Now wire the history seeding into `connectToGeminiWithContext` in sessionHandler.ts: 
+
+Read [](file:///home/lucazini03/conversational-agent-mastra/src/server/sessionHandler.ts#530-530), lines 530 to 575
+
+Replacing 5 lines with 14 lines in [](file:///home/lucazini03/conversational-agent-mastra/src/server/sessionHandler.ts)
+
+
+```
+
+```
+Now add the `seedConversationHistory` helper method. Let me find a good place to insert it, near `sendRealtimeText`: 
+
+Read [](file:///home/lucazini03/conversational-agent-mastra/src/server/sessionHandler.ts#690-690), lines 690 to 720
+
+Replacing 11 lines with 54 lines in [](file:///home/lucazini03/conversational-agent-mastra/src/server/sessionHandler.ts)
+
+
+```
+
+```
+
+
+Ran terminal command:  npm run build 2>&1
+
+Build pulito. Ecco un riassunto dell'analisi e del fix:
+
+---
+
+## Diagnosi
+
+Il log mostrava chiaramente il problema:
+
+- **WS#1 termina** con il modello che chiede *"Cosa la attrae di questo ruolo specifico in Google?"*
+- **WS#2 inizia** con l'utente che risponde *"sono sempre stato bravo a gestire altri..."*
+- **Ma il modello rigenera** *"Interessante, un background tecnico solido. E come mai questa posizione..."* — esattamente la risposta al *primo* messaggio dell'utente
+
+La causa: su una WS fresca il modello non ha **nessuna conversation history**. Il buffer nel system instruction è trattato come testo di sfondo, non come turni reali. Quando arriva l'audio dell'utente, Gemini riparte dallo stato compatto (`interview_phase: motivational`, `questions_asked: 1`) e rigenera la sua risposta standard a quel punto del colloquio, ignorando effettivamente il buffer.
+
+## Fix
+
+**Due modifiche complementari:**
+
+1. **`clientContent` history seeding** — subito dopo `voice.connect()` nel context switch, viene iniettato il buffer come turni reali di conversazione Gemini via `{ clientContent: { turns: [...], turnComplete: false } }`. Con `turnComplete: false` il modello NON genera nulla — aspetta l'audio dell'utente. Quando arriva, ha una vera history conversazionale e continua da lì.
+
+2. **`structuredBufferTurns`** — i frammenti di streaming (`"Cosa"`, `"la attrae"`, `"di questo"`) vengono **fusi** per ruolo contiguo, così al modello arrivano utterance complete invece di decine di mini-turni che lo confonderebbero.
+
+3. **Wording migliorato** del system instruction: da vago "do not repeat" a istruzione esplicita con **CRITICAL: do NOT re-ask any question that already appears below, do NOT re-introduce yourself**. 
+
+
+
+Made changes.

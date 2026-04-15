@@ -92,6 +92,9 @@ export class ContextManager extends EventEmitter<ContextManagerEvents> {
   // the actual WebSocket switch (i.e. the next turnComplete after extraction).
   private unprocessedBuffer: string[] = [];
   private bufferingSinceExtraction = false;
+  // Structured version of the buffer: consecutive same-role fragments merged
+  // into whole turns, ready for clientContent seeding on the new WebSocket.
+  private structuredBufferTurns: Array<{ role: 'user' | 'model'; text: string }> = [];
 
   constructor(opts: {
     sessionId: string;
@@ -116,6 +119,14 @@ export class ContextManager extends EventEmitter<ContextManagerEvents> {
     // If we're in the extraction/buffering window, also capture raw text.
     if (this.bufferingSinceExtraction) {
       this.unprocessedBuffer.push(`[${role}]: ${text}`);
+
+      // Merge consecutive same-role fragments into a single coherent turn.
+      const last = this.structuredBufferTurns[this.structuredBufferTurns.length - 1];
+      if (last && last.role === role) {
+        last.text += ' ' + text;
+      } else {
+        this.structuredBufferTurns.push({ role, text });
+      }
     }
   }
 
@@ -188,6 +199,7 @@ export class ContextManager extends EventEmitter<ContextManagerEvents> {
     this.extractionFlaggedForNextTurn = false;
     this.bufferingSinceExtraction = false;
     this.unprocessedBuffer = [];
+    this.structuredBufferTurns = [];
     // Keep transcript and currentState — they persist across switches.
     console.log(
       `[${this.sessionId}] ContextManager: switch complete. lastSwitchTokenCount updated to ${currentTokenCount}.`,
@@ -216,6 +228,7 @@ export class ContextManager extends EventEmitter<ContextManagerEvents> {
     this.extractionInProgress = true;
     this.bufferingSinceExtraction = true;
     this.unprocessedBuffer = [];
+    this.structuredBufferTurns = [];
 
     const deltaEntries = this.transcript.filter(
       (e) => e.turnIndex > this.lastExtractionTurnIndex,
@@ -339,10 +352,46 @@ INSTRUCTIONS:
       `\n---\n## CONVERSATION MEMORY (Compact State)\nThe following JSON represents the accumulated state of this conversation so far. Use it to maintain continuity — do NOT ask the user to repeat information already captured here.\n\n\`\`\`json\n${JSON.stringify(state, null, 2)}\n\`\`\``,
     );
 
-    // 3. Unprocessed buffer (recent context bridge)
-    if (bufferText) {
+    // 3. Recent conversation transcript (structured turns + anti-repetition)
+    if (this.structuredBufferTurns.length > 0) {
+      const turnLines = this.structuredBufferTurns.map((t, i) => {
+        const label = t.role === 'model' ? 'YOU (interviewer)' : 'CANDIDATE';
+        return `TURN ${i + 1} — ${label}: "${t.text}"`;
+      });
+
+      const lastModelTurn = [...this.structuredBufferTurns]
+        .reverse()
+        .find((t) => t.role === 'model');
+
+      let lastQuestionBlock = '';
+      if (lastModelTurn) {
+        lastQuestionBlock =
+          `\n════════════════════════════════════════\n` +
+          `YOUR LAST QUESTION/STATEMENT (already delivered to the candidate):\n` +
+          `"${lastModelTurn.text}"\n` +
+          `════════════════════════════════════════\n`;
+      }
+
       sections.push(
-        `\n---\n## RECENT CONTEXT (Already Delivered)\nThe following exchanges already happened — the user has already received these responses. This is provided ONLY for your context. Do NOT repeat, paraphrase, or re-deliver any of these responses. Simply continue the conversation from where it left off, waiting for the user's next input.\n\n${bufferText}`,
+        `\n---\n## CONVERSATION TRANSCRIPT (Already Spoken — DO NOT REPEAT)\n\n` +
+        `The following exchange ALREADY happened. Both you and the candidate heard it.\n` +
+        `This is HISTORY, not new content.\n\n` +
+        turnLines.join('\n') +
+        lastQuestionBlock +
+        `\nMANDATORY RULES:\n` +
+        `1. You have ALREADY said everything above. NEVER repeat, rephrase, or restate any of it.\n` +
+        `2. The candidate is currently responding or about to respond to your last question. LISTEN and react to their words.\n` +
+        `3. Your next response must be a DIRECT CONTINUATION — acknowledge what the candidate says and move forward with a NEW, different question or comment.`,
+      );
+    } else if (bufferText) {
+      // Fallback: raw buffer text (no structured turns available)
+      sections.push(
+        `\n---\n## RECENT CONTEXT (Already Delivered — DO NOT REPEAT)\n` +
+        `The exchanges below already took place. The user has already heard every response listed here.\n\n` +
+        `CRITICAL RULES:\n` +
+        `• Do NOT re-ask, rephrase, paraphrase, or re-deliver ANY question or statement that appears below.\n` +
+        `• When the user's next audio arrives, respond DIRECTLY and NATURALLY as a seamless continuation.\n\n` +
+        `${bufferText}`,
       );
     }
 

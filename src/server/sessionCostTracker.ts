@@ -280,6 +280,8 @@ export class SessionCostTracker {
     );
 
     const candidateDetails = this.extractModalityCounts(
+      obj.responseTokensDetails,
+      obj.response_tokens_details,
       obj.candidatesTokensDetails,
       obj.candidates_tokens_details,
       obj.outputTokenDetails,
