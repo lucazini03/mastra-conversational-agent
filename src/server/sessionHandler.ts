@@ -130,9 +130,14 @@ export class SessionHandler {
         await this.cleanup();
         break;
       case 'simulate_disconnect':
+        // Only allow in development — prevents abuse in production.
+        if (process.env.NODE_ENV === 'production') {
+          console.warn(`[${this.sessionId}] simulate_disconnect blocked in production`);
+          this.sendJSON({ type: 'error', message: 'simulate_disconnect is disabled in production.' });
+          break;
+        }
         if (this.geminiWs) {
           console.log(`[${this.sessionId}] Simulating Google disconnect...`);
-          // Forcefully emit an error and terminate to trigger the reconnect logic
           this.geminiWs.emit('error', new Error('Simulated Google WebSocket closure'));
           this.geminiWs.terminate();
         }

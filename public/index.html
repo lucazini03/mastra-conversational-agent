@@ -959,7 +959,11 @@
         systemEmpty.style.display = 'none';
         const el = document.createElement('div');
         el.className = 'log-line rag';
-        el.innerHTML = `<span class="rag-badge">RAG</span>${text}`;
+        const badge = document.createElement('span');
+        badge.className = 'rag-badge';
+        badge.textContent = 'RAG';
+        el.appendChild(badge);
+        el.appendChild(document.createTextNode(text));
         systemLog.appendChild(el);
         systemLog.scrollTop = systemLog.scrollHeight;
       }
@@ -968,11 +972,15 @@
         systemEmpty.style.display = 'none';
         const normalized = source === 'gemini' ? 'gemini' : 'silero';
         const className = normalized === 'gemini' ? 'vad-gemini' : 'vad-silero';
-        const badge = normalized === 'gemini' ? 'GEMINI VAD' : 'SILERO VAD';
+        const badgeText = normalized === 'gemini' ? 'GEMINI VAD' : 'SILERO VAD';
 
         const el = document.createElement('div');
         el.className = `log-line ${className}`;
-        el.innerHTML = `<span class="vad-badge ${normalized}">${badge}</span>${message}`;
+        const badge = document.createElement('span');
+        badge.className = `vad-badge ${normalized}`;
+        badge.textContent = badgeText;
+        el.appendChild(badge);
+        el.appendChild(document.createTextNode(message));
         systemLog.appendChild(el);
         systemLog.scrollTop = systemLog.scrollHeight;
       }
