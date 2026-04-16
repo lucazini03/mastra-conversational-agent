@@ -1,0 +1,14 @@
+================================================================================
+DATE: 2026-04-16
+================================================================================
+DAILY CUMULATIVE TOTALS:
+Input Text:    58,383 tokens
+Input Audio:   32,473 tokens
+Output Tokens: 8,878 tokens
+Estimated Cost: $0.247487
+
+--- SESSIONS ---
+[2026-04-16 11:30:01] Key: AIzaSyB0UzXsTueU_1Oz4nNnhVUbqADFPj5qppk
+[d6bf3d13] Input Tokens:  90,856 ($0.141206) [text=58,383, audio=32,473]
+[d6bf3d13] Output Tokens: 8,878 ($0.106281) [text=34, audio=8,844]
+[d6bf3d13] Est. Cost:     $0.247487 (duration 8.09 min, usage events 1800)

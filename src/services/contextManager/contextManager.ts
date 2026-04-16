@@ -53,6 +53,8 @@ export interface InjectionPayload {
   unprocessedBuffer: string;
   /** The model name that successfully produced the extraction (null if unknown). */
   extractionModel: string | null;
+  /** Buffer turns merged into coherent user/model turns — used to craft realtime_input continuation hint. */
+  structuredBufferTurns: Array<{ role: 'user' | 'model'; text: string }>;
 }
 
 export interface ContextManagerEvents {
@@ -189,6 +191,7 @@ export class ContextManager extends EventEmitter<ContextManagerEvents> {
       compactState: this.currentState,
       unprocessedBuffer: bufferText,
       extractionModel: this.lastSuccessfulExtractionModel,
+      structuredBufferTurns: [...this.structuredBufferTurns],
     };
   }
 
@@ -347,15 +350,29 @@ INSTRUCTIONS:
     // 1. Base system prompt (persona instructions)
     sections.push(this.baseSystemPrompt);
 
-    // 2. Compact memory (JSON state)
+    // 2. Session-continuation override — placed immediately after the base prompt
+    //    so that any "open with Phase 1 / introduce yourself" imperatives in the
+    //    base prompt are overridden BEFORE the model acts on them.
+    sections.push(
+      `\n---\n## ⚠️ SESSION CONTINUATION — READ BEFORE ACTING\n\n` +
+      `You are RESUMING an ONGOING conversation that is already in progress. This is NOT a new session.\n\n` +
+      `MANDATORY OVERRIDES (these take priority over any phase/flow instructions above):\n` +
+      `1. Do NOT re-introduce yourself or greet the user as if meeting for the first time.\n` +
+      `2. Do NOT re-execute any opening, onboarding, or introductory phase described in your instructions above.\n` +
+      `3. Do NOT call any search or document tool (e.g. search_documents) to retrieve information already present in the Compact State below — it was already retrieved earlier in this session.\n` +
+      `4. Consult the CONVERSATION MEMORY below to understand where you are in the conversation and continue seamlessly from that point.\n` +
+      `5. Your next action must be a DIRECT CONTINUATION — respond to the user's last message or wait quietly for their input.`,
+    );
+
+    // 3. Compact memory (JSON state)
     sections.push(
       `\n---\n## CONVERSATION MEMORY (Compact State)\nThe following JSON represents the accumulated state of this conversation so far. Use it to maintain continuity — do NOT ask the user to repeat information already captured here.\n\n\`\`\`json\n${JSON.stringify(state, null, 2)}\n\`\`\``,
     );
 
-    // 3. Recent conversation transcript (structured turns + anti-repetition)
+    // 4. Recent conversation transcript (structured turns + anti-repetition)
     if (this.structuredBufferTurns.length > 0) {
       const turnLines = this.structuredBufferTurns.map((t, i) => {
-        const label = t.role === 'model' ? 'YOU (interviewer)' : 'CANDIDATE';
+        const label = t.role === 'model' ? 'YOU (assistant)' : 'USER';
         return `TURN ${i + 1} — ${label}: "${t.text}"`;
       });
 
@@ -363,25 +380,25 @@ INSTRUCTIONS:
         .reverse()
         .find((t) => t.role === 'model');
 
-      let lastQuestionBlock = '';
+      let lastMessageBlock = '';
       if (lastModelTurn) {
-        lastQuestionBlock =
+        lastMessageBlock =
           `\n════════════════════════════════════════\n` +
-          `YOUR LAST QUESTION/STATEMENT (already delivered to the candidate):\n` +
+          `YOUR LAST MESSAGE (already delivered):\n` +
           `"${lastModelTurn.text}"\n` +
           `════════════════════════════════════════\n`;
       }
 
       sections.push(
         `\n---\n## CONVERSATION TRANSCRIPT (Already Spoken — DO NOT REPEAT)\n\n` +
-        `The following exchange ALREADY happened. Both you and the candidate heard it.\n` +
+        `The following exchange ALREADY happened. Both you and the user heard it.\n` +
         `This is HISTORY, not new content.\n\n` +
         turnLines.join('\n') +
-        lastQuestionBlock +
+        lastMessageBlock +
         `\nMANDATORY RULES:\n` +
         `1. You have ALREADY said everything above. NEVER repeat, rephrase, or restate any of it.\n` +
-        `2. The candidate is currently responding or about to respond to your last question. LISTEN and react to their words.\n` +
-        `3. Your next response must be a DIRECT CONTINUATION — acknowledge what the candidate says and move forward with a NEW, different question or comment.`,
+        `2. The user is currently responding or about to respond to your last message. LISTEN and react to their words.\n` +
+        `3. Your next response must be a DIRECT CONTINUATION — acknowledge what the user says and move forward naturally.`,
       );
     } else if (bufferText) {
       // Fallback: raw buffer text (no structured turns available)
@@ -397,7 +414,6 @@ INSTRUCTIONS:
 
     return sections.join('\n');
   }
-
   // ── Switch emission ──────────────────────────────────────────────────────
 
   private emitSwitchReady(): void {

@@ -9,6 +9,8 @@ dist
 *.db-*
 .netlify
 .vercel
+rag*
+text.txt
 
 # Session file logs (auto-generated, not for version control)
 logs/

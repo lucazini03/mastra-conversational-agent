@@ -34,6 +34,7 @@ export const professorStateSchema = z.object({
   weak_areas: z.array(z.string()).describe('Topics where the student showed weakness.'),
   strong_areas: z.array(z.string()).describe('Topics where the student answered well.'),
   grade_given: z.string().optional().describe('If a final grade was already given, store it here.'),
+  optional_notes: z.string().optional().describe('Any [optional] additional notes or observations the professor should keep in mind.'),
 });
 
 // ── Interview Coach ──────────────────────────────────────────────────────────
@@ -47,6 +48,7 @@ export const interviewCoachStateSchema = z.object({
   candidate_strengths: z.array(z.string()).describe('Strengths observed in the candidate.'),
   candidate_weaknesses: z.array(z.string()).describe('Weaknesses or gaps observed.'),
   star_responses_quality: z.string().optional().describe('General quality assessment of STAR method responses.'),
+  optional_notes: z.string().optional().describe('Any [optional] additional notes or observations the coach should keep in mind.'),
 });
 
 // ── Study Tutor ──────────────────────────────────────────────────────────────
@@ -59,6 +61,7 @@ export const studyTutorStateSchema = z.object({
   concepts_understood: z.array(z.string()).describe('Concepts the student has demonstrated understanding of.'),
   concepts_struggling: z.array(z.string()).describe('Concepts the student is still struggling with.'),
   analogies_used: z.array(z.string()).describe('Analogies or examples that were effective.'),
+  optional_notes: z.string().optional().describe('Any [optional] additional notes or observations the tutor should keep in mind.'),
 });
 
 // ── Audioguide ───────────────────────────────────────────────────────────────
@@ -69,6 +72,7 @@ export const audioguideStateSchema = z.object({
   current_artwork: z.string().optional().describe('The artwork or exhibit currently being described.'),
   artworks_visited: z.array(z.string()).describe('Artworks / exhibits already described in this session.'),
   visitor_interests: z.array(z.string()).describe('Topics or details the visitor showed particular interest in.'),
+  optional_notes: z.string().optional().describe('Any [optional] additional notes or observations the guide should keep in mind.'),
 });
 
 // ── Immigration Assistant ────────────────────────────────────────────────────
@@ -79,6 +83,7 @@ export const immigrationAssistantStateSchema = z.object({
   steps_given: z.array(z.string()).describe('Practical steps already communicated to the user.'),
   pending_questions: z.array(z.string()).describe('Questions the assistant still needs to clarify with the user.'),
   referrals: z.array(z.string()).describe('Offices or associations the user was referred to.'),
+  optional_notes: z.string().optional().describe('Any [optional] additional notes or observations the assistant should keep in mind.'),
 });
 
 // ── Language Tutor ───────────────────────────────────────────────────────────
@@ -91,6 +96,7 @@ export const languageTutorStateSchema = z.object({
   corrections_made: z.array(z.string()).describe('Grammar or vocabulary corrections given during the session.'),
   recurring_errors: z.array(z.string()).describe('Error patterns that keep repeating.'),
   vocabulary_introduced: z.array(z.string()).describe('New words or phrases the tutor introduced.'),
+  optional_notes: z.string().optional().describe('Any [optional] additional notes or observations the tutor should keep in mind.'),
 });
 
 // ── Schema registry ──────────────────────────────────────────────────────────

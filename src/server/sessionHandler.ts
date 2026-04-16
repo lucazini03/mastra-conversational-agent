@@ -27,6 +27,7 @@ import { browserRagService } from './ragService.js';
 import { SessionCostTracker } from './sessionCostTracker.js';
 import { SessionLogger } from './sessionLogger.js';
 import { ContextManager, type InjectionPayload } from '../services/contextManager/index.js';
+import { appendSessionToLog } from './usageTracker.js';
 
 // How long to wait before attempting a reconnect after Google drops the line.
 // Keep this short (1-2 s) so the user barely notices the gap.
@@ -488,20 +489,31 @@ export class SessionHandler {
       const { voice } = createdProfessor;
 
       // Inject resumption handle if available (preserves audio state).
-      if (this.resumptionHandle) {
-        const handle = this.resumptionHandle;
-        const anyVoice = voice as any;
-        if (typeof anyVoice.sendEvent === 'function') {
-          const originalSendEvent = anyVoice.sendEvent.bind(anyVoice);
-          anyVoice.sendEvent = (type: string, data: any) => {
-            if (type === 'setup' && data?.setup) {
-              this.withSessionResumption(data, handle);
-              console.log(`[${this.sessionId}] Context switch: injecting resumption handle ${handle.slice(0, 12)}...`);
-            }
-            return originalSendEvent(type, data);
-          };
-        }
-      }
+      // if (this.resumptionHandle) {
+      //   const handle = this.resumptionHandle;
+      //   const anyVoice = voice as any;
+      //   if (typeof anyVoice.sendEvent === 'function') {
+      //     const originalSendEvent = anyVoice.sendEvent.bind(anyVoice);
+      //     anyVoice.sendEvent = (type: string, data: any) => {
+      //       if (type === 'setup' && data?.setup) {
+      //         this.withSessionResumption(data, handle);
+      //         console.log(`[${this.sessionId}] Context switch: injecting resumption handle ${handle.slice(0, 12)}...`);
+      //       }
+      //       return originalSendEvent(type, data);
+      //     };
+      //   }
+      // }
+
+      // INTENTIONALLY no resumptionHandle injection here.
+// connectToGeminiWithContext is the deliberate context-compaction path:
+// its entire purpose is to shed the old session's token history and start
+// a clean new WebSocket backed only by the compact state in the system
+// instruction. Injecting a resumptionHandle would tell Google to restore
+// the full prior session — negating all cost savings AND creating a
+// "double memory" conflict (native history vs. injected compact state)
+// that causes the model to repeat its last output.
+// resumptionHandle is only used in connectToGemini(isReconnect=true) for
+// unexpected disconnects where we want continuity, not cost reduction.
 
       // Re-wire audio, transcripts, error handling — same as connectToGemini.
       voice.on('speaker', (audioStream: NodeJS.ReadableStream) => {
@@ -888,11 +900,15 @@ export class SessionHandler {
     // after finalization, then await the write at the very end of cleanup.
     const finalTokenSnap = this.costTracker.getFullTokenSnapshot();
     this.sessionLogger?.closeCurrentEpisode(finalTokenSnap);
-    const { summary: finalCostSummary } = this.costTracker.getSummary();
+    const { summary: finalCostSummary, sessionMinutes: finalSessionMinutes } = this.costTracker.getSummary();
     const sessionLogPromise = this.sessionLogger?.finalizeSession(finalCostSummary) ?? Promise.resolve();
     this.sessionLogger = null;
 
     this.emitSessionCostSummary();
+
+    appendSessionToLog(this.sessionId, finalCostSummary, finalSessionMinutes).catch((err) => {
+      console.error(`[${this.sessionId}] Failed to write usage_tracking.log: ${err instanceof Error ? err.message : String(err)}`);
+    });
 
     this.pendingMicByte = null;
     this.pendingTtsByte = null;
