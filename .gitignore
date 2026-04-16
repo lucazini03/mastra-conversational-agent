@@ -9,3 +9,6 @@ dist
 *.db-*
 .netlify
 .vercel
+logs
+*.log
+*.txt
