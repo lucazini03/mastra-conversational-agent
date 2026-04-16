@@ -11,9 +11,11 @@ dist
 .vercel
 rag*
 text.txt
+usage_tracking.log
 
 # Session file logs (auto-generated, not for version control)
 logs/
+
 
 #remove folders rag-docs
 rag-docs
