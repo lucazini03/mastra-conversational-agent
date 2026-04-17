@@ -88,6 +88,7 @@ verificare se questi costi sono coerenti con quelli riportati dalla dashboard di
 [4bda966d] RAG Tokens (subset of input): 978 (~$0.000733) [calls=1]
 [4bda966d] Growth: sublinear_like (delta input first=1,332, last=0, avg=55, slope/turn=-1.55)
 [4bda966d] Estimated Cost: $0.137842 (duration 4.42 min, usage events 858)
+Direi che su googele è 0.119, quindi più basso
 
 test più lungo, apparente molto cheap!
 [d6bf3d13] SESSION COST SUMMARY

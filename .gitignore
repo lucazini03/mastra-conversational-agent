@@ -15,6 +15,7 @@ usage_tracking.log
 
 # Session file logs (auto-generated, not for version control)
 logs/
+usage_tracking.log
 
 
 #remove folders rag-docs
