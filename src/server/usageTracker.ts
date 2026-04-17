@@ -30,6 +30,10 @@ import type { SessionCostSummary } from './sessionCostTracker.js';
 const LOG_FILE = path.join(process.cwd(), 'usage_tracking.log');
 const HR = '='.repeat(80);
 
+// Serialize writes to avoid read-modify-write races when multiple sessions end
+// close together. Without this queue, concurrent writes can drop previous entries.
+let writeQueue: Promise<void> = Promise.resolve();
+
 // ── Formatting helpers ────────────────────────────────────────────────────────
 
 function localDateStr(): string {
@@ -113,6 +117,7 @@ export async function appendSessionToLog(
   summary: SessionCostSummary,
   sessionMinutes: number,
 ): Promise<void> {
+  writeQueue = writeQueue.catch(() => undefined).then(async () => {
   const apiKey = process.env.GOOGLE_API_KEY ?? process.env.GEMINI_API_KEY ?? '(key not set)';
   const dateStr = localDateStr();
   const timestamp = localTimestampStr();
@@ -200,4 +205,7 @@ export async function appendSessionToLog(
   blockContent = blockContent.trimEnd() + '\n\n' + sessionEntry + '\n';
 
   await fs.writeFile(LOG_FILE, blockBefore + blockContent + blockAfter, 'utf8');
+  });
+
+  return writeQueue;
 }

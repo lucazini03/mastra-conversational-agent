@@ -10,6 +10,45 @@ import { PDFParse } from 'pdf-parse';
 const DEFAULT_RAG_DOCS_DIR = path.join(process.cwd(), 'rag-docs');
 const DEFAULT_RAG_DB_PATH = path.join(process.cwd(), 'rag.duckdb');
 const DEFAULT_RAG_INDEX = 'pdf_knowledge';
+const DEFAULT_RAG_QUERY_TOP_K = 5;
+const DEFAULT_RAG_MIN_SCORE = 0.1;
+const DEFAULT_RAG_CHUNK_MAX_SIZE = 1200;
+const DEFAULT_RAG_CHUNK_OVERLAP = 200;
+const DEFAULT_RAG_EMBED_BATCH_SIZE = 100;
+
+type RAGConfig = {
+  queryTopK: number;
+  minScore: number;
+  chunkMaxSize: number;
+  chunkOverlap: number;
+  embedBatchSize: number;
+};
+
+function readEnvInt(name: string, fallback: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+
+  const value = Number.parseInt(raw, 10);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function readEnvFloat(name: string, fallback: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+
+  const value = Number.parseFloat(raw);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function readEnvPositiveInt(name: string, fallback: number): number {
+  const value = readEnvInt(name, fallback);
+  return value > 0 ? value : fallback;
+}
+
+function readEnvNonNegativeFloat(name: string, fallback: number): number {
+  const value = readEnvFloat(name, fallback);
+  return value >= 0 ? value : fallback;
+}
 
 type RAGInitState = {
   ready: boolean;
@@ -28,6 +67,7 @@ export class BrowserRagService {
   private readonly indexName: string;
   private readonly vectorStore: DuckDBVector;
   private readonly google: ReturnType<typeof createGoogleGenerativeAI>;
+  private readonly config: RAGConfig;
   private embeddingModel: ReturnType<ReturnType<typeof createGoogleGenerativeAI>['textEmbeddingModel']> | null = null;
   //embeddingModel will hold the instance of the embedding model once it's initialized. It starts as null and is set in the ensureEmbeddingToolReady method, which tries to find a compatible embedding model from the Google Generative AI client.
   private initPromise: Promise<RAGInitState> | null = null;
@@ -54,6 +94,14 @@ export class BrowserRagService {
         // DuckDBVector is a vector store implementation. It will be saved to a file specified by RAG_DUCKDB_PATH or default to "rag.duckdb" in the current working directory.
 
         this.google = createGoogleGenerativeAI({ apiKey }); // create an instance of the Google Generative AI client using the provided API key. This client will be used to access embedding models for generating vector representations of text.
+
+        this.config = {
+          queryTopK: readEnvPositiveInt('RAG_QUERY_TOP_K', DEFAULT_RAG_QUERY_TOP_K),
+          minScore: readEnvNonNegativeFloat('RAG_MIN_SCORE', DEFAULT_RAG_MIN_SCORE),
+          chunkMaxSize: readEnvPositiveInt('RAG_CHUNK_MAX_SIZE', DEFAULT_RAG_CHUNK_MAX_SIZE),
+          chunkOverlap: readEnvPositiveInt('RAG_CHUNK_OVERLAP', DEFAULT_RAG_CHUNK_OVERLAP),
+          embedBatchSize: readEnvPositiveInt('RAG_EMBED_BATCH_SIZE', DEFAULT_RAG_EMBED_BATCH_SIZE),
+        };
   }
 
   async ensureReady(): Promise<RAGInitState> { //Promise<RAGInitState> means this function returns a promise that resolves to an object belonging to the RAGInitState type, which has a boolean "ready" property and a number "docCount" property.
@@ -67,7 +115,7 @@ export class BrowserRagService {
   }
   //overall, ensureReady is a method that initializes the RAG system by building the vector index from PDF documents. It ensures that the initialization process is only triggered once and returns the state of readiness and the count of indexed documents.
 
-  async queryRelevantContext(queryText: string, topK = 5):
+  async queryRelevantContext(queryText: string, topK?: number):
                     Promise<{ relevantContext: string; sources: string[]; scoredSources: RagScoredSource[] }> {
     //topK represents the maximum number of relevant chunks to retrieve based on cosine similarity
     // the function then returns an object containing the combined relevant context as a string, an array of source file names, and an array of scored sources with their respective scores and document text. The function first checks if the RAG system is ready and if the embedding model is available. If not, it logs a warning and returns empty results. If everything is ready, it generates an embedding for the query text, retrieves relevant chunks from the vector store based on cosine similarity, filters them by a minimum score threshold, ensures uniqueness by chunk, and constructs the relevant context and source information to return.
@@ -84,7 +132,8 @@ export class BrowserRagService {
       return { relevantContext: '', sources: [], scoredSources: [] };
     }
 
-    const minScore = Number.parseFloat(process.env.RAG_MIN_SCORE ?? '0.1'); // minimum cosine similarity score to consider a chunk relevant. This can be adjusted via the RAG_MIN_SCORE environment variable, allowing for tuning the precision of retrieved context.
+    const effectiveTopK = topK ?? this.config.queryTopK;
+    const minScore = this.config.minScore; // minimum cosine similarity score to consider a chunk relevant.
     const { embedding: queryEmbedding } = await embed({ // generate an embedding for the query text using the initialized embedding model. This vector representation of the query will be used to compare against the vectors of the document chunks in the vector store to find relevant context.
       model: embeddingModel,
       value: queryText,
@@ -93,7 +142,7 @@ export class BrowserRagService {
     const rawResults = await this.vectorStore.query({
       indexName: this.indexName, // specify which index to query against, allowing for organized management of multiple vector collections if needed.
       queryVector: queryEmbedding,
-      topK,
+      topK: effectiveTopK,
     });
 
     const scoredSources: RagScoredSource[] = rawResults
@@ -115,7 +164,7 @@ export class BrowserRagService {
     // log the top-k scores for debugging purposes, showing the file name and score for each of the top results. This can help in understanding which documents are being considered most relevant to the query and in tuning the retrieval process if needed.
     if (scoredSources.length > 0) {
       const debugScores = scoredSources
-        .slice(0, topK)
+        .slice(0, effectiveTopK)
         .map((s, i) => `#${i + 1} ${s.file} (${s.score.toFixed(3)})`)
         .join(' | ');
       console.log(`[RAG] top-k scores for "${queryText}": ${debugScores}`);
@@ -181,8 +230,8 @@ export class BrowserRagService {
 
         const docChunks = await doc.chunk({
           strategy: 'recursive', // recursive means it will try to split by paragraphs, then sentences, then words, to create chunks that are as large as possible without exceeding the maxSize
-          maxSize: 1200,
-          overlap: 200,
+          maxSize: this.config.chunkMaxSize, 
+          overlap: this.config.chunkOverlap,
         });
 
         docChunks.forEach((chunk, idx) => {
@@ -217,12 +266,11 @@ export class BrowserRagService {
     const texts = chunks.map((c) => c.text);
     // Google Vertex AI limits batch requests to 100 items max.
     // Split texts into batches and embed each batch separately.
-    const MAX_BATCH_SIZE = 100;
     const embeddings: number[][] = [];
 
-    for (let i = 0; i < texts.length; i += MAX_BATCH_SIZE) {
-      const batch = texts.slice(i, i + MAX_BATCH_SIZE);
-      console.log(`[RAG] Embedding batch ${Math.floor(i / MAX_BATCH_SIZE) + 1}/${Math.ceil(texts.length / MAX_BATCH_SIZE)} (${batch.length} items)...`);
+    for (let i = 0; i < texts.length; i += this.config.embedBatchSize) {
+      const batch = texts.slice(i, i + this.config.embedBatchSize);
+      console.log(`[RAG] Embedding batch ${Math.floor(i / this.config.embedBatchSize) + 1}/${Math.ceil(texts.length / this.config.embedBatchSize)} (${batch.length} items)...`);
       const { embeddings: batchEmbeddings } = await embedMany({
         model: embeddingModel,
         values: batch,

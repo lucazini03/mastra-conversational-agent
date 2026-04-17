@@ -27,9 +27,9 @@ const MEMORY_EXTRACTION_TOKEN_THRESHOLD = parseInt(
   10,
 );
 
-const MEMORY_EXTRACTION_MODEL = process.env.MEMORY_EXTRACTION_MODEL ?? 'gemini-2.5-flash';
+const MEMORY_EXTRACTION_MODEL = process.env.MEMORY_EXTRACTION_MODEL ?? 'gemini-3.1-flash-lite';
 const MEMORY_EXTRACTION_MODEL_BACKUP =
-  process.env.MEMORY_EXTRACTION_MODEL_BACKUP ?? 'gemini-2.0-flash';
+  process.env.MEMORY_EXTRACTION_MODEL_BACKUP ?? 'gemini-2.5-flash-lite';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 

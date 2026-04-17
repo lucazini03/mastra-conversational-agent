@@ -24,6 +24,7 @@ import {
   type AssistantId,
 } from '../config/professorConfig.js';
 import { browserRagService } from './ragService.js';
+import { documentService, type DocumentIndex } from './documentService.js';
 import { SessionCostTracker } from './sessionCostTracker.js';
 import { SessionLogger } from './sessionLogger.js';
 import { ContextManager, type InjectionPayload } from '../services/contextManager/index.js';
@@ -52,6 +53,12 @@ export class SessionHandler {
   private costTracker = new SessionCostTracker();
   private sessionCostSummarySent = false;
   private selectedAssistantId: AssistantId = DEFAULT_ASSISTANT_ID;
+
+  // ── Document summary injected into instructions at session start ─────────
+  // Contains the topic-constraint block appended to base instructions for
+  // 'professor' and 'audioguide' assistants. Null when no PDFs are loaded or
+  // the assistant type doesn't need constraining.
+  private enrichedInstructions: string | null = null;
 
   // ── Context Compaction (Observational Memory) ─────────────────────────────
   private contextManager: ContextManager | null = null;
@@ -219,12 +226,44 @@ export class SessionHandler {
     this.costTracker.reset();
     this.sessionCostSummarySent = false;
 
+    // ── Build instructions, optionally enriched with a document topic-constraint
+    let instructions = getAssistantInstructions(this.selectedAssistantId);
+    try {
+      // getDocumentsHashAndText() is in-memory cached after ragService.ensureReady()
+      // runs at startup, so this await is effectively instantaneous.
+      const { hash, text } = await documentService.getDocumentsHashAndText();
+      // getOrGenerateSummary() returns from the disk cache (also pre-warmed) so
+      // it does NOT block WebSocket startup with an LLM call.
+      const docSummary: DocumentIndex | null = await documentService.getOrGenerateSummary(hash, text);
+      if (
+        docSummary &&
+        (this.selectedAssistantId === 'professor' || this.selectedAssistantId === 'audioguide')
+      ) {
+        instructions +=
+          '\n\n---\nRIASSUNTO DEL DOCUMENTO:\n' +
+          'Il documento caricato dall\'utente contiene SOLO i seguenti argomenti.\n' +
+          'Usa questo elenco per:\n' +
+          '1. Presentare gli argomenti allo studente (FASE 2) senza fare RAG.\n' +
+          '2. Scegliere le query per search_documents: usa il nome esatto di un topic o subtopic come query (es. "Somma di vettori").\n' +
+          '3. Verificare che un argomento appartenga al materiale prima di trattarlo.\n' +
+          'NON chiamare search_documents per scoprire gli argomenti — li hai gia qui sotto.\n' +
+          'E\' VIETATO trattare argomenti non presenti in questo elenco.\n\n' +
+          JSON.stringify(docSummary, null, 2);
+      }
+    } catch (err) {
+      console.warn(
+        `[${this.sessionId}] Failed to load doc summary (proceeding without constraint):`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+    this.enrichedInstructions = instructions;
+
     // Initialise ContextManager for this session & assistant.
-    const basePrompt = getAssistantInstructions(this.selectedAssistantId);
+    // Use enriched instructions so the topic-constraint survives context compaction.
     this.contextManager = new ContextManager({
       sessionId: this.sessionId,
       assistantId: this.selectedAssistantId,
-      baseSystemPrompt: basePrompt,
+      baseSystemPrompt: instructions,
     });
     this.contextManager.on('switchReady', (payload) => this.handleContextSwitch(payload));
 
@@ -256,7 +295,9 @@ export class SessionHandler {
         });
       }
 
-      const instructions = getAssistantInstructions(this.selectedAssistantId);
+      // Use enriched instructions (with doc topic-constraint) when available.
+      const instructions =
+        this.enrichedInstructions ?? getAssistantInstructions(this.selectedAssistantId);
       createdProfessor = createProfessorAgent({
         instructions,
         name: this.getAssistantLabel(this.selectedAssistantId),
@@ -1023,7 +1064,7 @@ export class SessionHandler {
   private getOpeningPrompt(assistantId: AssistantId): string {
   switch (assistantId) {
     case 'professor':
-      return `Usa search_documents adesso per identificare la materia e gli argomenti principali del documento caricato. Poi, senza aspettare, presentati come "il professore di [materia]" e chiedi allo studente il suo nome e il suo livello di istruzione. Sii diretto e formale, ma non freddo.`;
+      return `Hai gia il RIASSUNTO DEL DOCUMENTO nelle tue istruzioni — NON chiamare search_documents adesso. Presentati come "il professore di [materia]" (deducila dal riassunto) e chiedi allo studente il suo nome e il suo livello di istruzione. Sii diretto e formale, ma non freddo.`;
 
     case 'interview_coach':
       return `Usa search_documents adesso per estrarre: nome dell'azienda, titolo del ruolo, responsabilità principali, requisiti. Poi, immediatamente, apri il colloquio presentandoti come un HR della società trovata nel documento. Usa "Lei". Annuncia che al termine darai un feedback. Chiedi se il candidato è pronto.`;
