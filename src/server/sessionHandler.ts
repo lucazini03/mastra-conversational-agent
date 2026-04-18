@@ -27,7 +27,7 @@ import { browserRagService } from './ragService.js';
 import { documentService, type DocumentIndex } from './documentService.js';
 import { SessionCostTracker } from './sessionCostTracker.js';
 import { SessionLogger } from './sessionLogger.js';
-import { ContextManager, type InjectionPayload } from '../services/contextManager/index.js';
+import { ContextManager, type InjectionPayload, type AnyAssistantState } from '../services/contextManager/index.js';
 import { appendSessionToLog } from './usageTracker.js';
 
 // How long to wait before attempting a reconnect after Google drops the line.
@@ -228,6 +228,7 @@ export class SessionHandler {
 
     // ── Build instructions, optionally enriched with a document topic-constraint
     let instructions = getAssistantInstructions(this.selectedAssistantId);
+    let initialState: AnyAssistantState | null = null;
     try {
       // getDocumentsHashAndText() is in-memory cached after ragService.ensureReady()
       // runs at startup, so this await is effectively instantaneous.
@@ -239,16 +240,47 @@ export class SessionHandler {
         docSummary &&
         (this.selectedAssistantId === 'professor' || this.selectedAssistantId === 'audioguide')
       ) {
+        // Build the initial unified state with topics_to_cover / artworks_to_visit
+        // pre-populated from the document summary. This becomes the single source of
+        // truth that the extraction model will progressively subtract from.
+        if (this.selectedAssistantId === 'professor') {
+          initialState = {
+            user_language: '',
+            behavioral_directives: [],
+            student_info: { name: '', education_level: '' },
+            topics_to_cover: docSummary.main_topics.map((t) => ({
+              main_topic: t.topic,
+              subtopics: t.subtopics,
+            })),
+            strong_areas: [],
+            weak_areas: [],
+            overall_evaluation: '',
+          } as AnyAssistantState;
+        } else {
+          initialState = {
+            user_language: '',
+            behavioral_directives: [],
+            visitor_info: { name: '', preferences: '' },
+            artworks_to_visit: docSummary.main_topics.map((t) => ({
+              artwork_name: t.topic,
+              highlights: t.subtopics,
+            })),
+            visitor_interests: [],
+            confusing_aspects: [],
+            overall_impression: '',
+          } as AnyAssistantState;
+        }
+
+        // Inject the initial state into instructions using the same CONVERSATION MEMORY
+        // format used by assembleSystemInstruction on context switches, so the model
+        // sees a consistent memory block regardless of whether this is a fresh start
+        // or a post-switch session.
         instructions +=
-          '\n\n---\nRIASSUNTO DEL DOCUMENTO:\n' +
-          'Il documento caricato dall\'utente contiene SOLO i seguenti argomenti.\n' +
-          'Usa questo elenco per:\n' +
-          '1. Presentare gli argomenti allo studente (FASE 2) senza fare RAG.\n' +
-          '2. Scegliere le query per search_documents: usa il nome esatto di un topic o subtopic come query (es. "Somma di vettori").\n' +
-          '3. Verificare che un argomento appartenga al materiale prima di trattarlo.\n' +
-          'NON chiamare search_documents per scoprire gli argomenti — li hai gia qui sotto.\n' +
-          'E\' VIETATO trattare argomenti non presenti in questo elenco.\n\n' +
-          JSON.stringify(docSummary, null, 2);
+          '\n\n---\n## CONVERSATION MEMORY (Stato Iniziale della Sessione)\n' +
+          'Il seguente JSON rappresenta lo stato iniziale. ' +
+          'Il campo `topics_to_cover` (o `artworks_to_visit`) contiene tutto il programma da svolgere. ' +
+          'Man mano che gli argomenti vengono trattati, questo campo viene aggiornato (sottratto) automaticamente.\n\n' +
+          '```json\n' + JSON.stringify(initialState, null, 2) + '\n```';
       }
     } catch (err) {
       console.warn(
@@ -258,13 +290,19 @@ export class SessionHandler {
     }
     this.enrichedInstructions = instructions;
 
-    // Initialise ContextManager for this session & assistant.
-    // Use enriched instructions so the topic-constraint survives context compaction.
+    // Initialise ContextManager with base instructions only (no memory block).
+    // The compact state is re-injected by assembleSystemInstruction on each
+    // context switch, so including it in baseSystemPrompt would duplicate it.
     this.contextManager = new ContextManager({
       sessionId: this.sessionId,
       assistantId: this.selectedAssistantId,
-      baseSystemPrompt: instructions,
+      baseSystemPrompt: getAssistantInstructions(this.selectedAssistantId),
     });
+    // Seed the initial state so the first extraction merges INTO it rather
+    // than building the state from scratch (which would lose topics_to_cover).
+    if (initialState) {
+      this.contextManager.setInitialState(initialState);
+    }
     this.contextManager.on('switchReady', (payload) => this.handleContextSwitch(payload));
 
     // Initialise session file logger (writes to logs/sessions/ on teardown).
@@ -293,6 +331,7 @@ export class SessionHandler {
           const msg = err instanceof Error ? err.message : String(err);
           console.warn(`[${this.sessionId}] RAG warmup failed:`, msg);
         });
+        // rag warmup failed will be emitted when the user starts a session and the ragService tries to load the embedding model and the vector store. We want to warm up the ragService at this point to minimize latency on the first RAG query, but if it fails we don't want to block the session start — the assistant can still function without RAG, albeit with less relevant responses until it's ready. The warning log will help us identify any issues with the RAG warmup process in production. 
       }
 
       // Use enriched instructions (with doc topic-constraint) when available.

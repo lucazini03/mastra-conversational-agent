@@ -18,23 +18,25 @@ const baseFields = {
   ),
   /** The language the user is currently speaking / last spoke in. */
   user_language: z.string().describe('ISO-639-1 code or natural-language name of the language the user is currently using.'),
-  /** Key topics or themes discussed so far. */
-  topics_covered: z.array(z.string()).describe('List of topics or themes that have been discussed so far.'),
 };
 
 // ── Professor ────────────────────────────────────────────────────────────────
 
 export const professorStateSchema = z.object({
   ...baseFields,
-  student_name: z.string().optional().describe('Name of the student, if provided.'),
-  education_level: z.string().optional().describe('Education level declared by the student (e.g. high-school, university).'),
-  current_subject: z.string().optional().describe('The subject / macro-topic currently being examined.'),
-  questions_asked: z.number().describe('How many questions the professor has asked so far.'),
-  correct_answers: z.number().describe('How many of those questions were answered correctly.'),
-  weak_areas: z.array(z.string()).describe('Topics where the student showed weakness.'),
-  strong_areas: z.array(z.string()).describe('Topics where the student answered well.'),
-  grade_given: z.string().optional().describe('If a final grade was already given, store it here.'),
-  optional_notes: z.string().optional().describe('Any [optional] additional notes or observations the professor should keep in mind.'),
+  student_info: z.object({
+    name: z.string().describe('Name of the student, if provided.'),
+    education_level: z.string().describe('Education level declared by the student (e.g. high-school, university).'),
+  }).describe('Basic information about the student.'),
+  topics_to_cover: z.array(z.object({
+    main_topic: z.string().describe('Main topic or chapter still to be examined.'),
+    subtopics: z.array(z.string()).describe('Subtopics or concepts within this main topic that still need to be covered.'),
+  })).describe(
+    'DECREASING list of remaining topics. When a topic/subtopic has been discussed and verified (positively or negatively), REMOVE it from this list and record the outcome in strong_areas or weak_areas instead. Never add new items here.',
+  ),
+  strong_areas: z.array(z.string()).describe('Topics where the student answered well — include brief feedback per entry.'),
+  weak_areas: z.array(z.string()).describe('Topics where the student showed weakness or gaps — include brief feedback per entry.'),
+  overall_evaluation: z.string().describe('Running synthesis of the student performance. Update after each verified topic.'),
 });
 
 // ── Interview Coach ──────────────────────────────────────────────────────────
@@ -68,11 +70,19 @@ export const studyTutorStateSchema = z.object({
 
 export const audioguideStateSchema = z.object({
   ...baseFields,
-  museum_or_site: z.string().optional().describe('Name of the museum or cultural site.'),
-  current_artwork: z.string().optional().describe('The artwork or exhibit currently being described.'),
-  artworks_visited: z.array(z.string()).describe('Artworks / exhibits already described in this session.'),
-  visitor_interests: z.array(z.string()).describe('Topics or details the visitor showed particular interest in.'),
-  optional_notes: z.string().optional().describe('Any [optional] additional notes or observations the guide should keep in mind.'),
+  visitor_info: z.object({
+    name: z.string().describe('Name of the visitor, if provided.'),
+    preferences: z.string().describe('Visitor preferences or visit style (e.g. fast, detailed, interactive).'),
+  }).describe('Basic information about the visitor.'),
+  artworks_to_visit: z.array(z.object({
+    artwork_name: z.string().describe('Name of the artwork, exhibit, or room still to be described.'),
+    highlights: z.array(z.string()).describe('Key aspects or details of this artwork not yet described.'),
+  })).describe(
+    'DECREASING list of remaining artworks/exhibits. When an artwork has been fully described, REMOVE it from this list and record visitor reactions in visitor_interests or confusing_aspects instead. Never add new items here.',
+  ),
+  visitor_interests: z.array(z.string()).describe('Aspects, artworks, or topics the visitor showed particular interest in — with brief notes per entry.'),
+  confusing_aspects: z.array(z.string()).describe('Aspects or artworks the visitor found confusing or needed clarification on — with brief notes per entry.'),
+  overall_impression: z.string().describe('Running synthesis of the visit experience so far.'),
 });
 
 // ── Immigration Assistant ────────────────────────────────────────────────────

@@ -118,7 +118,7 @@ export async function appendSessionToLog(
   sessionMinutes: number,
 ): Promise<void> {
   writeQueue = writeQueue.catch(() => undefined).then(async () => {
-  const apiKey = process.env.GOOGLE_API_KEY ?? process.env.GEMINI_API_KEY ?? '(key not set)';
+  const apiKey = process.env.GEMINI_LIVE_API_KEY ?? process.env.GEMINI_LLM_API_KEY ?? '(key not set)';
   const dateStr = localDateStr();
   const timestamp = localTimestampStr();
 

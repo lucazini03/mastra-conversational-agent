@@ -16,7 +16,7 @@
 
 import { EventEmitter } from 'events';
 import { generateObject } from 'ai';
-import { google } from '@ai-sdk/google';
+import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import type { AssistantId } from '../../config/professorConfig.js';
 import { getSchemaForAssistant, type AnyAssistantState } from './schemas.js';
 
@@ -209,6 +209,16 @@ export class ContextManager extends EventEmitter<ContextManagerEvents> {
     );
   }
 
+  /**
+   * Pre-populate the state from an externally computed initial value (e.g. a
+   * topics_to_cover list built from the document summary at session start).
+   * This ensures the first extraction merges INTO the pre-populated state
+   * rather than creating it from scratch.
+   */
+  setInitialState(state: AnyAssistantState): void {
+    this.currentState = state;
+  }
+
   /** Whether the manager has a compact state ready for injection. */
   get hasCompactState(): boolean {
     return this.currentState !== null;
@@ -255,23 +265,80 @@ export class ContextManager extends EventEmitter<ContextManagerEvents> {
       ? JSON.stringify(this.currentState, null, 2)
       : 'null (first extraction — create the state from scratch)';
 
-    const extractionPrompt = `You are maintaining a rolling JSON state for a voice conversation.
+    const extractionPrompt = `You are a memory extraction engine for a voice conversation. You receive the current JSON state and a new transcript delta. You must output the updated state.
 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 CURRENT STATE:
 ${existingStateJSON}
 
-NEW TRANSCRIPT DELTA (turns since last extraction):
+NEW TRANSCRIPT DELTA (roles: [model] = assistant/professor, [user] = student/visitor):
 ${deltaText}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-INSTRUCTIONS:
-- MERGE the new information from the transcript delta INTO the existing state.
-- UPDATE fields where new information supersedes old information.
-- APPEND to array fields (topics_covered, weak_areas, etc.) — do NOT overwrite them.
-- If the existing state is null, create it from scratch based on the delta.
-- Always preserve and update behavioral_directives with any new observations about user preferences, tone, or requests.
-- Be concise: use short phrases, not full sentences.
-- Only include information that is explicitly present in the conversation.
-- Include all relevant details that could help maintain context in future turns, but do NOT add any assumptions or information not directly supported by the transcript.`;
+═══════════════════════════════════════════════════════
+RULE 1 — strong_areas / weak_areas: STUDENT PERFORMANCE ONLY
+═══════════════════════════════════════════════════════
+These fields measure what THE STUDENT (role=[user]) demonstrated on their own.
+
+strong_areas: add an entry ONLY when the student spontaneously and correctly answered a question WITHOUT being told the answer first.
+weak_areas:   add an entry when:
+  - the student said they don't know / couldn't answer, OR
+  - the student gave a wrong answer, OR
+  - the professor ([model]) had to explain the topic because the student didn't know it.
+
+CRITICAL: If the sequence is "[model] asks → [user] says 'I don't know' or 'dimmelo tu' → [model] explains", this is a WEAK area (student did NOT know it). Do NOT add it to strong_areas. The fact that the professor explained something does not mean the student understood it beforehand.
+
+═══════════════════════════════════════════════════════
+RULE 2 — topics_to_cover / artworks_to_visit: MANDATORY REMOVAL
+═══════════════════════════════════════════════════════
+This is a SHRINKING TODO list. Your primary duty is to remove items from it as they are covered.
+
+DEFINITION OF "COVERED": A subtopic is covered when the professor ([model]) explicitly asked about it or addressed it in this transcript delta. It does not matter if the student answered correctly, incorrectly, or not at all — the moment the professor touched it, it is covered and MUST be removed.
+
+REMOVAL PROCEDURE — execute this for every subtopic in the list:
+  Step 1. Name the subtopic.
+  Step 2. Search the transcript delta for any [model] turn that mentions it, asks about it, or explains it.
+  Step 3. Found? → REMOVE this subtopic from the list.
+           Not found? → KEEP it unchanged.
+  Step 4. If a main_topic has zero remaining subtopics after removal, delete the entire main_topic entry.
+
+NEVER add new items. Only remove.
+
+CONCRETE EXAMPLE:
+  Before state:
+    topics_to_cover: [{ main_topic: "Vettori", subtopics: ["Definizione", "Modulo", "Vettore nullo"] }]
+    strong_areas: [], weak_areas: []
+
+  Transcript delta:
+    [model]: Come definisce un vettore?
+    [user]: Non me lo ricordo.
+    [model]: Un vettore è un ente geometrico con modulo, direzione e verso.
+    [model]: Sa dirmi cos'è il vettore nullo?
+    [user]: È il vettore le cui componenti sono tutte zero.
+    [model]: Esatto.
+
+  Correct output:
+    topics_to_cover: [{ main_topic: "Vettori", subtopics: ["Modulo"] }]
+    ← "Definizione" removed because [model] asked about it; "Vettore nullo" removed because [model] asked about it; "Modulo" kept because it was never mentioned.
+    strong_areas: ["Vettore nullo: risposta corretta."]
+    weak_areas:   ["Definizione di vettore: lo studente non ricordava, il professore ha spiegato."]
+
+  WRONG output (do NOT produce this):
+    topics_to_cover: [{ main_topic: "Vettori", subtopics: ["Definizione", "Modulo", "Vettore nullo"] }]
+    ← ERROR: items were discussed but not removed.
+
+═══════════════════════════════════════════════════════
+RULE 3 — OTHER FIELDS
+═══════════════════════════════════════════════════════
+- APPEND to behavioral_directives for any new user preference or tone observation.
+- UPDATE student_info / visitor_info if new data appears.
+- UPDATE overall_evaluation to reflect current progress.
+- Be concise: short phrases, not full sentences.
+- Only include information explicitly present in the transcript.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SELF-CHECK before outputting: Count the subtopics the professor mentioned in the delta. Verify that exact number of subtopics was removed from topics_to_cover. If your output has the same number of subtopics as the current state, you made an error — go back and remove the covered ones.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
 
     const modelCandidates = [MEMORY_EXTRACTION_MODEL, MEMORY_EXTRACTION_MODEL_BACKUP].filter(
       (value, index, all) => value.trim().length > 0 && all.indexOf(value) === index,
@@ -287,7 +354,7 @@ INSTRUCTIONS:
         );
 
         const { object } = await generateObject({
-          model: google(modelName),
+          model: createGoogleGenerativeAI({ apiKey: process.env.GEMINI_LLM_API_KEY ?? '' })(modelName),
           schema,
           prompt: extractionPrompt,
         });

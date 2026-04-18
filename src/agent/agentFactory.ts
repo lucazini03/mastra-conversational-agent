@@ -64,9 +64,9 @@ export interface ProfessorAgent {
  * Call once per incoming WebSocket connection; call destroy() on disconnect.
  */
 export function createProfessorAgent(options: CreateProfessorAgentOptions = {}): ProfessorAgent {
-  const apiKey = process.env.GOOGLE_API_KEY;
+  const apiKey = process.env.GEMINI_LIVE_API_KEY;
   if (!apiKey) {
-    throw new Error('GOOGLE_API_KEY is required. Copy .env.example to .env and fill it in.');
+    throw new Error('GEMINI_LIVE_API_KEY is required. Copy .env.example to .env and fill it in.');
   }
 
   const instructions = options.instructions ?? PROFESSOR_INSTRUCTIONS;

@@ -73,9 +73,9 @@ export class BrowserRagService {
   private initPromise: Promise<RAGInitState> | null = null;
 
   constructor() {
-        const apiKey = process.env.GOOGLE_API_KEY; // because we are going to use gemini's embedding models
+        const apiKey = process.env.GEMINI_EMBEDDING_API_KEY; // because we are going to use gemini's embedding models
         if (!apiKey) {
-          throw new Error('GOOGLE_API_KEY is required for RAG embeddings.');
+          throw new Error('GEMINI_EMBEDDING_API_KEY is required for RAG embeddings.');
         }
 
         this.docsDir = process.env.RAG_DOCS_DIR
@@ -134,16 +134,20 @@ export class BrowserRagService {
 
     const effectiveTopK = topK ?? this.config.queryTopK;
     const minScore = this.config.minScore; // minimum cosine similarity score to consider a chunk relevant.
+    const t0 = performance.now(); // start a timer to measure how long the query process takes, which can be useful for performance monitoring and debugging.
     const { embedding: queryEmbedding } = await embed({ // generate an embedding for the query text using the initialized embedding model. This vector representation of the query will be used to compare against the vectors of the document chunks in the vector store to find relevant context.
       model: embeddingModel,
       value: queryText,
     });
+    console.log(`[RAG] Generated embedding for query in ${(performance.now() - t0).toFixed(2)} ms.`); // log the time taken to generate the embedding for the query, which can help in understanding the performance of the embedding process and in identifying any potential bottlenecks.
 
+    const t1 = performance.now();
     const rawResults = await this.vectorStore.query({
       indexName: this.indexName, // specify which index to query against, allowing for organized management of multiple vector collections if needed.
       queryVector: queryEmbedding,
       topK: effectiveTopK,
     });
+    console.log(`[RAG] Retrieved raw results from vector store in ${(performance.now() - t1).toFixed(2)} ms.`); // log the time taken to retrieve results from the vector store, which can help in understanding the performance of the retrieval process and in identifying any potential bottlenecks.
 
     const scoredSources: RagScoredSource[] = rawResults
       .map((r: any) => {

@@ -62,9 +62,9 @@ class DocumentService {
 
   private getGoogleClient(): ReturnType<typeof createGoogleGenerativeAI> {
     if (!this.googleClient) {
-      const apiKey = process.env.GOOGLE_API_KEY;
+      const apiKey = process.env.GEMINI_LLM_API_KEY;
       if (!apiKey) {
-        throw new Error('[DocumentService] GOOGLE_API_KEY is required for summary generation.');
+        throw new Error('[DocumentService] GEMINI_LLM_API_KEY is required for summary generation.');
       }
       this.googleClient = createGoogleGenerativeAI({ apiKey });
     }
