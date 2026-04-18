@@ -59,6 +59,43 @@ export interface ProfessorAgent {
   destroy: () => Promise<void>;
 }
 
+function silenceAudioDebugLogs() {
+  const originalLog = console.log;
+  const originalDebug = console.debug;
+
+  const filterLogs = (args: any[]) =>
+    args.map((arg) => {
+      if (typeof arg === 'string') {
+        return arg.replace(/"(data|audioData)":\s*"[^"]{100,}"/g, '"$1": "[AUDIO_TRUNCATED]"');
+      }
+
+      if (typeof arg === 'object' && arg !== null) {
+        try {
+          return JSON.parse(
+            JSON.stringify(arg, (key, value) => {
+              if ((key === 'data' || key === 'audioData') && typeof value === 'string' && value.length > 100) {
+                return '[AUDIO_TRUNCATED]';
+              }
+              if (value && value.type === 'Buffer') {
+                return '[BUFFER_TRUNCATED]';
+              }
+              return value;
+            }),
+          );
+        } catch {
+          return arg;
+        }
+      }
+      return arg;
+    });
+
+  console.log = (...args) => originalLog.apply(console, filterLogs(args));
+  console.debug = (...args) => originalDebug.apply(console, filterLogs(args));
+}
+
+// Chiamala qui nel factory
+silenceAudioDebugLogs();
+
 /**
  * Creates a fully isolated professor agent for one user session.
  * Call once per incoming WebSocket connection; call destroy() on disconnect.
