@@ -1,9 +1,10 @@
 // src/services/contextManager/index.ts
-export { ContextManager } from './contextManager.js';
+export { ContextManager, generateMarkdownSummary } from './contextManager.js';
 export type { TranscriptEntry, TokenUsageSnapshot, InjectionPayload } from './contextManager.js';
 export {
   getSchemaForAssistant,
   ASSISTANT_STATE_SCHEMAS,
   type AssistantState,
   type AnyAssistantState,
+  type SessionMode,
 } from './schemas.js';

@@ -18,7 +18,7 @@ import { EventEmitter } from 'events';
 import { generateObject } from 'ai';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import type { AssistantId } from '../../config/professorConfig.js';
-import { getSchemaForAssistant, type AnyAssistantState } from './schemas.js';
+import { getSchemaForAssistant, type AnyAssistantState, type SessionMode } from './schemas.js';
 
 // ── Environment-driven configuration ────────────────────────────────────────
 
@@ -72,6 +72,8 @@ export class ContextManager extends EventEmitter<ContextManagerEvents> {
   private sessionId: string;
   private assistantId: AssistantId;
   private baseSystemPrompt: string;
+  /** Professor-only: RAG (document-based) or FREE_ROAM (knowledge-based). */
+  private sessionMode: SessionMode | undefined;
 
   // ── Transcript tracking ──────────────────────────────────────────────────
   private transcript: TranscriptEntry[] = [];
@@ -104,11 +106,14 @@ export class ContextManager extends EventEmitter<ContextManagerEvents> {
     sessionId: string;
     assistantId: AssistantId;
     baseSystemPrompt: string;
+    /** Professor-only: determines extraction strategy and markdown format. */
+    sessionMode?: SessionMode;
   }) {
     super();
     this.sessionId = opts.sessionId;
     this.assistantId = opts.assistantId;
     this.baseSystemPrompt = opts.baseSystemPrompt;
+    this.sessionMode = opts.sessionMode;
   }
 
   // ── Public API ───────────────────────────────────────────────────────────
@@ -267,80 +272,8 @@ export class ContextManager extends EventEmitter<ContextManagerEvents> {
       ? JSON.stringify(this.currentState, null, 2)
       : 'null (first extraction — create the state from scratch)';
 
-    const extractionPrompt = `You are a memory extraction engine for a voice conversation. You receive the current JSON state and a new transcript delta. You must output the updated state.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-CURRENT STATE:
-${existingStateJSON}
-
-NEW TRANSCRIPT DELTA (roles: [model] = assistant/professor, [user] = student/visitor):
-${deltaText}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-═══════════════════════════════════════════════════════
-RULE 1 — strong_areas / weak_areas: STUDENT PERFORMANCE ONLY
-═══════════════════════════════════════════════════════
-These fields measure what THE STUDENT (role=[user]) demonstrated on their own.
-
-strong_areas: add an entry ONLY when the student spontaneously and correctly answered a question WITHOUT being told the answer first.
-weak_areas:   add an entry when:
-  - the student said they don't know / couldn't answer, OR
-  - the student gave a wrong answer, OR
-  - the professor ([model]) had to explain the topic because the student didn't know it.
-
-CRITICAL: If the sequence is "[model] asks → [user] says 'I don't know' or 'dimmelo tu' → [model] explains", this is a WEAK area (student did NOT know it). Do NOT add it to strong_areas. The fact that the professor explained something does not mean the student understood it beforehand.
-
-═══════════════════════════════════════════════════════
-RULE 2 — topics_to_cover / artworks_to_visit: MANDATORY REMOVAL
-═══════════════════════════════════════════════════════
-This is a SHRINKING TODO list. Your primary duty is to remove items from it as they are covered.
-
-DEFINITION OF "COVERED": A subtopic is covered when the professor ([model]) explicitly asked about it or addressed it in this transcript delta. It does not matter if the student answered correctly, incorrectly, or not at all — the moment the professor touched it, it is covered and MUST be removed.
-
-REMOVAL PROCEDURE — execute this for every subtopic in the list:
-  Step 1. Name the subtopic.
-  Step 2. Search the transcript delta for any [model] turn that mentions it, asks about it, or explains it.
-  Step 3. Found? → REMOVE this subtopic from the list.
-           Not found? → KEEP it unchanged.
-  Step 4. If a main_topic has zero remaining subtopics after removal, delete the entire main_topic entry.
-
-NEVER add new items. Only remove.
-
-CONCRETE EXAMPLE:
-  Before state:
-    topics_to_cover: [{ main_topic: "Vettori", subtopics: ["Definizione", "Modulo", "Vettore nullo"] }]
-    strong_areas: [], weak_areas: []
-
-  Transcript delta:
-    [model]: Come definisce un vettore?
-    [user]: Non me lo ricordo.
-    [model]: Un vettore è un ente geometrico con modulo, direzione e verso.
-    [model]: Sa dirmi cos'è il vettore nullo?
-    [user]: È il vettore le cui componenti sono tutte zero.
-    [model]: Esatto.
-
-  Correct output:
-    topics_to_cover: [{ main_topic: "Vettori", subtopics: ["Modulo"] }]
-    ← "Definizione" removed because [model] asked about it; "Vettore nullo" removed because [model] asked about it; "Modulo" kept because it was never mentioned.
-    strong_areas: ["Vettore nullo: risposta corretta."]
-    weak_areas:   ["Definizione di vettore: lo studente non ricordava, il professore ha spiegato."]
-
-  WRONG output (do NOT produce this):
-    topics_to_cover: [{ main_topic: "Vettori", subtopics: ["Definizione", "Modulo", "Vettore nullo"] }]
-    ← ERROR: items were discussed but not removed.
-
-═══════════════════════════════════════════════════════
-RULE 3 — OTHER FIELDS
-═══════════════════════════════════════════════════════
-- APPEND to behavioral_directives for any new user preference or tone observation.
-- UPDATE student_info / visitor_info if new data appears.
-- UPDATE overall_evaluation to reflect current progress.
-- Be concise: short phrases, not full sentences.
-- Only include information explicitly present in the transcript.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-SELF-CHECK before outputting: Count the subtopics the professor mentioned in the delta. Verify that exact number of subtopics was removed from topics_to_cover. If your output has the same number of subtopics as the current state, you made an error — go back and remove the covered ones.
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
+    // ── Build the extraction prompt based on assistant type and session mode ──
+    const extractionPrompt = this.buildExtractionPrompt(existingStateJSON, deltaText);
 
     const modelCandidates = [MEMORY_EXTRACTION_MODEL, MEMORY_EXTRACTION_MODEL_BACKUP].filter(
       (value, index, all) => value.trim().length > 0 && all.indexOf(value) === index,
@@ -388,10 +321,17 @@ SELF-CHECK before outputting: Count the subtopics the professor mentioned in the
     this.lastExtractionTurnIndex = lastTurnIndex;
     this.extractionSucceeded = true;
 
+    // ── Debug logging: JSON state + markdown summary (if professor) ───────
     console.log(
-      `[${this.sessionId}] ContextManager: extraction succeeded. Extracted state:`,
+      `[${this.sessionId}] ContextManager: extraction succeeded [mode=${this.sessionMode ?? 'generic'}]. Extracted JSON state:`,
     );
     console.log(JSON.stringify(this.currentState, null, 2));
+
+    if (this.assistantId === 'professor' && this.sessionMode) {
+      const markdown = generateMarkdownSummary(this.currentState, this.sessionMode);
+      console.log(`[${this.sessionId}] ContextManager: corresponding Markdown summary:`);
+      console.log(markdown);
+    }
 
     this.emit('extractionDone', true);
     this.extractionInProgress = false;
@@ -429,15 +369,20 @@ SELF-CHECK before outputting: Count the subtopics the professor mentioned in the
       `MANDATORY OVERRIDES (these take priority over any phase/flow instructions above):\n` +
       `1. Do NOT re-introduce yourself or greet the user as if meeting for the first time.\n` +
       `2. Do NOT re-execute any opening, onboarding, or introductory phase described in your instructions above.\n` +
-      `3. Do NOT call any search or document tool (e.g. search_documents) to retrieve information already present in the Compact State below — it was already retrieved earlier in this session.\n` +
-      `4. Consult the CONVERSATION MEMORY below to understand where you are in the conversation and continue seamlessly from that point.\n` +
+      `3. Do NOT call any search or document tool (e.g. search_documents) to retrieve information already present in the Session State below — it was already retrieved earlier in this session.\n` +
+      `4. Consult the SESSION STATE below to understand where you are in the conversation and continue seamlessly from that point.\n` +
       `5. Your next action must be a DIRECT CONTINUATION — respond to the user's last message or wait quietly for their input.`,
     );
 
-    // 3. Compact memory (JSON state)
-    sections.push(
-      `\n---\n## CONVERSATION MEMORY (Compact State)\nThe following JSON represents the accumulated state of this conversation so far. Use it to maintain continuity — do NOT ask the user to repeat information already captured here.\n\n\`\`\`json\n${JSON.stringify(state, null, 2)}\n\`\`\``,
-    );
+    // 3. Session state — markdown for professor (compact), JSON for others
+    if (this.assistantId === 'professor' && this.sessionMode) {
+      const markdown = generateMarkdownSummary(state, this.sessionMode);
+      sections.push(`\n---\n${markdown}`);
+    } else {
+      sections.push(
+        `\n---\n## SESSION STATE (Compact State)\nThe following JSON represents the accumulated state of this conversation so far. Use it to maintain continuity — do NOT ask the user to repeat information already captured here.\n\n\`\`\`json\n${JSON.stringify(state, null, 2)}\n\`\`\``,
+      );
+    }
 
     // 4. Recent conversation transcript (structured turns + anti-repetition)
     if (this.structuredBufferTurns.length > 0) {
@@ -484,6 +429,110 @@ SELF-CHECK before outputting: Count the subtopics the professor mentioned in the
 
     return sections.join('\n');
   }
+  // ── Extraction prompt builders ─────────────────────────────────────────
+
+  /**
+   * Builds the extraction prompt based on assistant type and session mode.
+   * Professor gets mode-specific prompts; all other assistants use the generic one.
+   */
+  private buildExtractionPrompt(existingStateJSON: string, deltaText: string): string {
+    const header = `You are a memory extraction engine for a voice conversation. You receive the current JSON state and a new transcript delta. You must output the updated state.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CURRENT STATE:
+${existingStateJSON}
+
+NEW TRANSCRIPT DELTA (roles: [model] = assistant/professor, [user] = student/visitor):
+${deltaText}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
+
+    // ── Professor RAG: update mastery scores on fixed syllabus ────────────
+    if (this.assistantId === 'professor' && this.sessionMode === 'RAG') {
+      return `${header}
+
+═══════════════════════════════════════════════════════
+RULE 1 — topics_to_cover: UPDATE MASTERY SCORES (never add/remove items)
+═══════════════════════════════════════════════════════
+This is a FIXED syllabus. NEVER add or remove items from topics_to_cover.
+For each subtopic mentioned by the professor ([model]) in the transcript delta, update its mastery_score:
+  3 = student answered correctly without help
+  2 = student answered partially or with hints
+  1 = student didn't know / professor had to explain
+  0 = not yet discussed (keep current score — don't reset to 0)
+
+CRITICAL: Only update scores for subtopics explicitly discussed. Leave untouched subtopics at their current score.
+
+═══════════════════════════════════════════════════════
+RULE 2 — OTHER FIELDS
+═══════════════════════════════════════════════════════
+- KEEP session_mode unchanged (always "RAG").
+- UPDATE current_topic if the professor moved to a new main topic.
+- APPEND to behavioral_directives for new user preferences.
+- UPDATE student_info if new data appears.
+- UPDATE overall_evaluation to reflect progress.
+- covered_concepts: leave empty (not used in RAG mode).
+- Be concise: short phrases, not full sentences.`;
+    }
+
+    // ── Professor FREE_ROAM: track new concepts on-the-fly ───────────────
+    if (this.assistantId === 'professor' && this.sessionMode === 'FREE_ROAM') {
+      return `${header}
+
+═══════════════════════════════════════════════════════
+RULE 1 — current_topic
+═══════════════════════════════════════════════════════
+If the user changed the subject in this delta, update current_topic to the new subject.
+
+═══════════════════════════════════════════════════════
+RULE 2 — covered_concepts: TRACK NEW CONCEPTS
+═══════════════════════════════════════════════════════
+Identify specific concepts the professor ([model]) discussed or asked about in this delta.
+Summarize each into 2-3 words (e.g. "Berlin Wall", "Dark Phase", "Legge di Ohm").
+Add new concepts to covered_concepts with a mastery_score:
+  3 = student answered correctly without help
+  2 = student answered partially or with hints
+  1 = student didn't know / professor had to explain
+Do NOT duplicate concepts already in the list. If a concept was re-discussed, update its score.
+
+═══════════════════════════════════════════════════════
+RULE 3 — OTHER FIELDS
+═══════════════════════════════════════════════════════
+- KEEP session_mode unchanged (always "FREE_ROAM").
+- topics_to_cover: leave empty (not used in FREE_ROAM mode).
+- APPEND to behavioral_directives for new user preferences.
+- UPDATE student_info if new data appears.
+- UPDATE overall_evaluation to reflect progress.
+- Be concise: short phrases, not full sentences.`;
+    }
+
+    // ── Generic prompt for all non-professor assistants ───────────────────
+    return `${header}
+
+═══════════════════════════════════════════════════════
+RULE 1 — SHRINKING LISTS (topics_to_cover / artworks_to_visit)
+═══════════════════════════════════════════════════════
+If the schema includes a shrinking list (topics_to_cover, artworks_to_visit, etc.):
+- When a subtopic/item is explicitly addressed by the [model] in the delta, REMOVE it.
+- NEVER add new items. Only remove covered ones.
+- If a parent has zero remaining children after removal, delete the parent entry.
+
+═══════════════════════════════════════════════════════
+RULE 2 — PERFORMANCE TRACKING
+═══════════════════════════════════════════════════════
+If the schema includes performance arrays (candidate_strengths, visitor_interests, etc.):
+- ADD entries only based on what was explicitly demonstrated in the delta.
+- Be specific and concise per entry.
+
+═══════════════════════════════════════════════════════
+RULE 3 — OTHER FIELDS
+═══════════════════════════════════════════════════════
+- APPEND to behavioral_directives for any new user preference or tone observation.
+- UPDATE personal info fields if new data appears.
+- UPDATE evaluation/impression fields to reflect current progress.
+- Be concise: short phrases, not full sentences.
+- Only include information explicitly present in the transcript.`;
+  }
+
   // ── Switch emission ──────────────────────────────────────────────────────
 
   private emitSwitchReady(): void {
@@ -497,10 +546,103 @@ SELF-CHECK before outputting: Count the subtopics the professor mentioned in the
     const payload = this.buildInjectionPayload();
     if (!payload) return;
 
+    // ── Debug logging: show both JSON state and markdown summary ──────────
     console.log(
       `[${this.sessionId}] ContextManager: emitting switchReady at turnComplete. Buffer lines: ${this.unprocessedBuffer.length}`,
     );
+    console.log(`[${this.sessionId}] ── Extracted JSON state:`);
+    console.log(JSON.stringify(this.currentState, null, 2));
+
+    if (this.assistantId === 'professor' && this.sessionMode && this.currentState) {
+      const markdown = generateMarkdownSummary(this.currentState, this.sessionMode);
+      console.log(`[${this.sessionId}] ── Produced Markdown summary:`);
+      console.log(markdown);
+    }
 
     this.emit('switchReady', payload);
   }
+}
+
+// ── Markdown Summary Generator (module-level, reusable) ──────────────────────
+//
+// Converts the professor's JSON state into a compact markdown checklist for
+// injection into the Gemini Live system prompt. Reduces token overhead by ~70%
+// compared to raw JSON.
+//
+// Exported so sessionHandler can also use it for the initial state injection.
+
+/**
+ * Mastery score → checkbox character:
+ *   [ ] = 0 (untouched)
+ *   [!] = 1 (gaps / professor explained)
+ *   [x] = 2+ (sufficient or strong)
+ */
+function masteryCheckbox(score: number): string {
+  if (score === 0) return '[ ]';
+  if (score === 1) return '[!]';
+  return '[x]';
+}
+
+export function generateMarkdownSummary(state: AnyAssistantState, mode: SessionMode): string {
+  const s = state as any; // We know the shape from professorStateSchema
+  const lines: string[] = [];
+
+  // ── Header ─────────────────────────────────────────────────────────────
+  lines.push(`## SESSION STATE (${mode === 'RAG' ? 'RAG Mode' : 'Free Roam'})`);
+  lines.push('');
+
+  // ── Student info ───────────────────────────────────────────────────────
+  const name = s.student_info?.name || '(non fornito)';
+  const level = s.student_info?.education_level || '(non fornito)';
+  lines.push(`**Student:** ${name} (${level})`);
+
+  // ── Current topic (always shown, most relevant for FREE_ROAM) ──────────
+  if (s.current_topic) {
+    lines.push(`**Current Topic:** ${s.current_topic}`);
+  }
+
+  // ── Evaluation ─────────────────────────────────────────────────────────
+  if (s.overall_evaluation) {
+    lines.push(`**Evaluation:** ${s.overall_evaluation}`);
+  }
+  lines.push('');
+
+  // ── RAG mode: syllabus progress ────────────────────────────────────────
+  if (mode === 'RAG' && Array.isArray(s.topics_to_cover) && s.topics_to_cover.length > 0) {
+    lines.push('### Syllabus Progress');
+    for (const topic of s.topics_to_cover) {
+      lines.push(`#### ${topic.main_topic}`);
+      if (Array.isArray(topic.subtopics)) {
+        for (const sub of topic.subtopics) {
+          lines.push(`- ${masteryCheckbox(sub.mastery_score)} ${sub.name} (${sub.mastery_score}/3)`);
+        }
+      }
+    }
+    lines.push('');
+  }
+
+  // ── FREE_ROAM mode: covered concepts ───────────────────────────────────
+  if (mode === 'FREE_ROAM' && Array.isArray(s.covered_concepts) && s.covered_concepts.length > 0) {
+    lines.push('### Covered Concepts');
+    for (const c of s.covered_concepts) {
+      lines.push(`- ${masteryCheckbox(c.mastery_score)} ${c.concept} (${c.mastery_score}/3)`);
+    }
+    lines.push('');
+  } else if (mode === 'FREE_ROAM') {
+    lines.push('### Covered Concepts');
+    lines.push('(none yet)');
+    lines.push('');
+  }
+
+  // ── Behavioural directives ─────────────────────────────────────────────
+  if (Array.isArray(s.behavioral_directives) && s.behavioral_directives.length > 0) {
+    lines.push(`**Directives:** ${s.behavioral_directives.join('; ')}`);
+  }
+
+  // ── Language ───────────────────────────────────────────────────────────
+  if (s.user_language) {
+    lines.push(`**Language:** ${s.user_language}`);
+  }
+
+  return lines.join('\n');
 }

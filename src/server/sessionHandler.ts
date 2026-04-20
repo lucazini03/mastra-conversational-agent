@@ -22,13 +22,21 @@ import {
   DEFAULT_ASSISTANT_ID,
   getAssistantInstructions,
   isAssistantId,
+  PROFESSOR_RAG_PROMPT,
+  PROFESSOR_FREE_ROAM_PROMPT,
   type AssistantId,
 } from '../config/professorConfig.js';
 import { BrowserRagService } from './ragService.js';
 import { documentService } from './documentService.js';
 import { SessionCostTracker } from './sessionCostTracker.js';
 import { SessionLogger } from './sessionLogger.js';
-import { ContextManager, type InjectionPayload, type AnyAssistantState } from '../services/contextManager/index.js';
+import {
+  ContextManager,
+  generateMarkdownSummary,
+  type InjectionPayload,
+  type AnyAssistantState,
+  type SessionMode,
+} from '../services/contextManager/index.js';
 import { appendSessionToLog } from './usageTracker.js';
 import type { UploadedDocumentConfig } from './documentConfigStore.js';
 
@@ -268,39 +276,98 @@ export class SessionHandler {
     this.costTracker.reset();
     this.sessionCostSummarySent = false;
 
-    // ── Build instructions, optionally enriched with a document topic-constraint
-    let instructions = getAssistantInstructions(this.selectedAssistantId);
+    // ── Determine session mode (professor-only: RAG vs FREE_ROAM) ──────────
+    const hasDocuments = this.selectedSummaryFiles.length > 0 || this.selectedRagFiles.length > 0;
+    const sessionMode: SessionMode | undefined =
+      this.selectedAssistantId === 'professor'
+        ? (hasDocuments ? 'RAG' : 'FREE_ROAM')
+        : undefined;
+
+    if (sessionMode) {
+      console.log(
+        `[${this.sessionId}] Professor session mode: ${sessionMode} (documents: ${hasDocuments ? 'yes' : 'none'})`,
+      );
+    }
+
+    // ── Build instructions based on assistant type and session mode ───────
+    let instructions: string;
     let initialState: AnyAssistantState | null = null;
-    try {
-      const hasSummaryDocs = this.selectedSummaryFiles.length > 0;
-      const summarySourceFiles = hasSummaryDocs ? this.selectedSummaryFiles : [];
-      const { hash, text } = await documentService.getDocumentsHashAndText(summarySourceFiles);
-      const { index: docSummary, generationTokens: summaryTokens } =
-        await documentService.getOrGenerateSummary(hash, text);
-      if (summaryTokens) {
-        this.costTracker.recordSummaryUsage(summaryTokens.input, summaryTokens.output);
-      }
-      if (
-        docSummary &&
-        (this.selectedAssistantId === 'professor' || this.selectedAssistantId === 'audioguide')
-      ) {
-        // Build the initial unified state with topics_to_cover / artworks_to_visit
-        // pre-populated from the document summary. This becomes the single source of
-        // truth that the extraction model will progressively subtract from.
-        if (this.selectedAssistantId === 'professor') {
+
+    if (this.selectedAssistantId === 'professor' && sessionMode === 'RAG') {
+      // ── RAG MODE: generate syllabus from PDFs, inject as markdown ──────
+      instructions = PROFESSOR_RAG_PROMPT;
+      try {
+        const summarySourceFiles = this.selectedSummaryFiles.length > 0
+          ? this.selectedSummaryFiles
+          : [];
+        const { hash, text } = await documentService.getDocumentsHashAndText(summarySourceFiles);
+        const { index: docSummary, generationTokens: summaryTokens } =
+          await documentService.getOrGenerateSummary(hash, text);
+        if (summaryTokens) {
+          this.costTracker.recordSummaryUsage(summaryTokens.input, summaryTokens.output);
+        }
+        if (docSummary) {
           initialState = {
+            session_mode: 'RAG',
             user_language: '',
             behavioral_directives: [],
             student_info: { name: '', education_level: '' },
+            current_topic: '',
             topics_to_cover: docSummary.main_topics.map((t) => ({
               main_topic: t.topic,
-              subtopics: t.subtopics,
+              subtopics: t.subtopics.map((s) => ({ name: s, mastery_score: 0 })),
             })),
-            strong_areas: [],
-            weak_areas: [],
+            covered_concepts: [],
             overall_evaluation: '',
           } as AnyAssistantState;
-        } else {
+
+          // Inject the initial state as a compact markdown checklist.
+          const markdown = generateMarkdownSummary(initialState, 'RAG');
+          instructions += '\n\n---\n' + markdown;
+          console.log(`[${this.sessionId}] Initial RAG state (markdown):\n${markdown}`);
+        }
+      } catch (err) {
+        console.warn(
+          `[${this.sessionId}] Failed to load doc summary (proceeding without syllabus):`,
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+
+    } else if (this.selectedAssistantId === 'professor' && sessionMode === 'FREE_ROAM') {
+      // ── FREE_ROAM MODE: no documents, zero initial latency ─────────────
+      // No summary generation call needed — the professor improvises.
+      instructions = PROFESSOR_FREE_ROAM_PROMPT;
+      initialState = {
+        session_mode: 'FREE_ROAM',
+        user_language: '',
+        behavioral_directives: [],
+        student_info: { name: '', education_level: '' },
+        current_topic: '',
+        topics_to_cover: [],
+        covered_concepts: [],
+        overall_evaluation: '',
+      } as AnyAssistantState;
+
+      const markdown = generateMarkdownSummary(initialState, 'FREE_ROAM');
+      instructions += '\n\n---\n' + markdown;
+      console.log(`[${this.sessionId}] Initial FREE_ROAM state (markdown):\n${markdown}`);
+
+    } else {
+      // ── Non-professor assistants: existing behaviour unchanged ──────────
+      instructions = getAssistantInstructions(this.selectedAssistantId);
+      try {
+        const hasSummaryDocs = this.selectedSummaryFiles.length > 0;
+        const summarySourceFiles = hasSummaryDocs ? this.selectedSummaryFiles : [];
+        const { hash, text } = await documentService.getDocumentsHashAndText(summarySourceFiles);
+        const { index: docSummary, generationTokens: summaryTokens } =
+          await documentService.getOrGenerateSummary(hash, text);
+        if (summaryTokens) {
+          this.costTracker.recordSummaryUsage(summaryTokens.input, summaryTokens.output);
+        }
+        if (
+          docSummary &&
+          this.selectedAssistantId === 'audioguide'
+        ) {
           initialState = {
             user_language: '',
             behavioral_directives: [],
@@ -313,37 +380,38 @@ export class SessionHandler {
             confusing_aspects: [],
             overall_impression: '',
           } as AnyAssistantState;
-        }
 
-        // Inject the initial state into instructions using the same CONVERSATION MEMORY
-        // format used by assembleSystemInstruction on context switches, so the model
-        // sees a consistent memory block regardless of whether this is a fresh start
-        // or a post-switch session.
-        instructions +=
-          '\n\n---\n## CONVERSATION MEMORY (Stato Iniziale della Sessione)\n' +
-          'Il seguente JSON rappresenta lo stato iniziale. ' +
-          'Il campo `topics_to_cover` (o `artworks_to_visit`) contiene tutto il programma da svolgere. ' +
-          'Man mano che gli argomenti vengono trattati, questo campo viene aggiornato (sottratto) automaticamente.\n\n' +
-          '```json\n' + JSON.stringify(initialState, null, 2) + '\n```';
+          instructions +=
+            '\n\n---\n## SESSION STATE (Stato Iniziale della Sessione)\n' +
+            'Il seguente JSON rappresenta lo stato iniziale. ' +
+            'Il campo `artworks_to_visit` contiene tutto il percorso da svolgere.\n\n' +
+            '```json\n' + JSON.stringify(initialState, null, 2) + '\n```';
+        }
+      } catch (err) {
+        console.warn(
+          `[${this.sessionId}] Failed to load doc summary (proceeding without constraint):`,
+          err instanceof Error ? err.message : String(err),
+        );
       }
-    } catch (err) {
-      console.warn(
-        `[${this.sessionId}] Failed to load doc summary (proceeding without constraint):`,
-        err instanceof Error ? err.message : String(err),
-      );
     }
     this.enrichedInstructions = instructions;
 
-    // Initialise ContextManager with base instructions only (no memory block).
-    // The compact state is re-injected by assembleSystemInstruction on each
-    // context switch, so including it in baseSystemPrompt would duplicate it.
+    // ── Initialise ContextManager ────────────────────────────────────────
+    // Base instructions only (no memory block). The compact state is re-injected
+    // by assembleSystemInstruction on each context switch.
+    const basePrompt = this.selectedAssistantId === 'professor' && sessionMode === 'FREE_ROAM'
+      ? PROFESSOR_FREE_ROAM_PROMPT
+      : this.selectedAssistantId === 'professor' && sessionMode === 'RAG'
+        ? PROFESSOR_RAG_PROMPT
+        : getAssistantInstructions(this.selectedAssistantId);
+
     this.contextManager = new ContextManager({
       sessionId: this.sessionId,
       assistantId: this.selectedAssistantId,
-      baseSystemPrompt: getAssistantInstructions(this.selectedAssistantId),
+      baseSystemPrompt: basePrompt,
+      sessionMode,
     });
-    // Seed the initial state so the first extraction merges INTO it rather
-    // than building the state from scratch (which would lose topics_to_cover).
+    // Seed the initial state so the first extraction merges INTO it.
     if (initialState) {
       this.contextManager.setInitialState(initialState);
     }
@@ -1188,7 +1256,14 @@ export class SessionHandler {
   private getOpeningPrompt(assistantId: AssistantId): string {
   switch (assistantId) {
     case 'professor':
-      return `Hai gia il RIASSUNTO DEL DOCUMENTO nelle tue istruzioni — NON chiamare search_documents adesso. Presentati come "il professore di [materia]" (deducila dal riassunto) e chiedi allo studente il suo nome e il suo livello di istruzione. Sii diretto e formale, ma non freddo.`;
+      // Check if we have documents (RAG mode) or not (FREE_ROAM mode).
+      if (this.selectedRagFiles.length > 0 || this.selectedSummaryFiles.length > 0) {
+        // RAG mode: syllabus is already in the instructions from the document summary.
+        return `Hai gia il PROGRAMMA nelle tue istruzioni — NON chiamare search_documents adesso. Presentati come "il professore di [materia]" (deducila dal programma) e chiedi allo studente il suo nome e il suo livello di istruzione. Sii diretto e formale, ma non freddo.`;
+      } else {
+        // FREE_ROAM mode: no documents, ask the student what they want to study.
+        return `Presentati come il professore. Chiedi allo studente il suo nome, il suo livello di istruzione (liceo, università, ecc.) e su cosa vuole essere interrogato oggi. Sii diretto e formale, ma non freddo.`;
+      }
 
     case 'interview_coach':
       return `Usa search_documents adesso per estrarre: nome dell'azienda, titolo del ruolo, responsabilità principali, requisiti. Poi, immediatamente, apri il colloquio presentandoti come un HR della società trovata nel documento. Usa "Lei". Annuncia che al termine darai un feedback. Chiedi se il candidato è pronto.`;
