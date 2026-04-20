@@ -369,6 +369,48 @@
 
       .assistant-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
+      /* ── Document inputs ── */
+      .doc-config {
+        padding: 12px 14px 14px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+
+      .doc-field {
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+      }
+
+      .doc-label {
+        font-size: 0.63rem;
+        font-family: var(--font-mono);
+        letter-spacing: 0.09em;
+        text-transform: uppercase;
+        color: var(--ink);
+      }
+
+      .doc-hint {
+        font-size: 0.62rem;
+        font-family: var(--font-mono);
+        color: var(--muted);
+        line-height: 1.35;
+      }
+
+      .doc-input {
+        background: rgba(255,255,255,0.04);
+        border: 1px solid var(--border);
+        color: var(--ink);
+        border-radius: 8px;
+        padding: 7px 9px;
+        font: 0.66rem/1.35 var(--font-mono);
+      }
+
+      .doc-input:disabled {
+        opacity: 0.45;
+      }
+
       /* ── Controls ── */
       .controls-row {
         display: flex;
@@ -752,6 +794,26 @@
 
           <!-- Controls -->
           <div class="panel">
+            <div class="panel-header">
+              <div class="panel-header-dot" style="background:#f59e0b;box-shadow:0 0 6px #f59e0b;"></div>
+              Document Sources
+            </div>
+            <div class="doc-config">
+              <label class="doc-field" for="summaryDocInput">
+                <span class="doc-label">Summary document (single file)</span>
+                <input class="doc-input" id="summaryDocInput" type="file" accept=".pdf,.txt,.md,.markdown,.text" />
+                <span class="doc-hint">Used to generate initial summary/topic map for the session.</span>
+              </label>
+
+              <label class="doc-field" for="ragDocInput">
+                <span class="doc-label">RAG document(s) (one or more files)</span>
+                <input class="doc-input" id="ragDocInput" type="file" accept=".pdf,.txt,.md,.markdown,.text" multiple />
+                <span class="doc-hint">Used by search_documents tool during conversation. If empty, summary file is reused for RAG.</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="panel">
             <div class="controls-row">
               <button id="startBtn">&#9654; Start</button>
               <button id="stopBtn" disabled>&#9632; End</button>
@@ -821,6 +883,8 @@
       const soundBars = document.getElementById('soundBars');
       const robotRing = document.getElementById('robotRing');
       const robotRing2 = document.getElementById('robotRing2');
+      const summaryDocInput = document.getElementById('summaryDocInput');
+      const ragDocInput = document.getElementById('ragDocInput');
 
       const ASSISTANTS = [
         { id: 'professor', label: 'Il Professore' },
@@ -1041,6 +1105,48 @@
         assistantPicker.querySelectorAll('button').forEach(b => b.disabled = disabled);
       }
 
+      function setDocumentInputsDisabled(disabled) {
+        summaryDocInput.disabled = disabled;
+        ragDocInput.disabled = disabled;
+      }
+
+      async function uploadDocumentConfig() {
+        const summaryFile = summaryDocInput.files?.[0] ?? null;
+        const ragFiles = ragDocInput.files ? Array.from(ragDocInput.files) : [];
+
+        if (!summaryFile && ragFiles.length === 0) {
+          return { documentConfigId: null, summaryCount: 0, ragCount: 0, effectiveRagCount: 0 };
+        }
+
+        const formData = new FormData();
+        if (summaryFile) formData.append('summaryDocument', summaryFile);
+        ragFiles.forEach((file) => formData.append('ragDocuments', file));
+
+        const response = await fetch('/api/document-config', {
+          method: 'POST',
+          body: formData,
+        });
+
+        let payload = null;
+        try {
+          payload = await response.json();
+        } catch {
+          payload = null;
+        }
+
+        if (!response.ok) {
+          const errorText = payload?.error ?? `Upload failed with status ${response.status}`;
+          throw new Error(errorText);
+        }
+
+        return {
+          documentConfigId: payload?.documentConfigId ?? null,
+          summaryCount: Number(payload?.summaryCount ?? 0),
+          ragCount: Number(payload?.ragCount ?? 0),
+          effectiveRagCount: Number(payload?.effectiveRagCount ?? 0),
+        };
+      }
+
       function getSelectedAssistantLabel() {
         return ASSISTANTS.find(a => a.id === selectedAssistantId)?.label ?? 'Assistant';
       }
@@ -1199,6 +1305,31 @@
         if (ws) return;
         sessionReady = false;
         startBtn.disabled = true;
+        setStatus('Preparing documents...', '');
+
+        let uploadResult;
+        try {
+          uploadResult = await uploadDocumentConfig();
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          logSystem(`Document upload error: ${message}`, 'error');
+          setStatus('Document upload failed.', 'error');
+          startBtn.disabled = false;
+          return;
+        }
+
+        if (uploadResult.documentConfigId) {
+          const mode =
+            uploadResult.summaryCount > 0 && uploadResult.ragCount > 0
+              ? `summary=${uploadResult.summaryCount}, rag=${uploadResult.ragCount}`
+              : uploadResult.summaryCount > 0
+                ? `summary=${uploadResult.summaryCount} (reused for rag=${uploadResult.effectiveRagCount})`
+                : `rag=${uploadResult.ragCount} (summary disabled)`;
+          logSystem(`Documents configured: ${mode}`);
+        } else {
+          logSystem('No summary or RAG documents selected. Starting without document context.');
+        }
+
         setStatus('Connecting...', '');
 
         const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -1208,13 +1339,20 @@
         ws.onopen = async () => {
           try {
             await startMicCapture();
-            ws.send(JSON.stringify({ type: 'start_session', assistantId: selectedAssistantId }));
+            ws.send(
+              JSON.stringify({
+                type: 'start_session',
+                assistantId: selectedAssistantId,
+                documentConfigId: uploadResult.documentConfigId,
+              }),
+            );
             startConversationTimer();
             stopBtn.disabled = false;
             testBtn.disabled = false;
             sendBtn.disabled = false;
             chatInput.disabled = false;
             setAssistantButtonsDisabled(true);
+            setDocumentInputsDisabled(true);
             setStatus(`Connecting to ${getSelectedAssistantLabel()}...`);
             logSystem(`Microphone ready. Waiting for ${getSelectedAssistantLabel()}...`);
           } catch (err) {
@@ -1306,6 +1444,7 @@
           sendBtn.disabled = true;
           chatInput.disabled = true;
           setAssistantButtonsDisabled(false);
+          setDocumentInputsDisabled(false);
           setStatus('Idle', '');
           logSystem('Session ended.');
         };

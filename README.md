@@ -87,7 +87,7 @@ Questo permette di testare e distribuire l'assistente per scenari completamente 
 * `src/agent/`: Fabbrica e configurazione degli agenti Mastra.
 * `src/config/`: Prompts di sistema e parametri specifici per i vari ruoli dell'agente.
 * `public/`: File serviti al client, incluso HTML, logica di acquisizione microfono e modelli VAD compilati (ONNX/WASM).
-* `rag-docs/`: Directory contenente i documenti PDF o testuali che vengono ingeriti nel database DuckDB per il RAG.
+* `logs/uploads/`: Directory temporanea dove il server salva i file caricati dalla UI (summary e RAG) per la durata della sessione.
 
 ## Setup e Avvio Locale
 
@@ -101,4 +101,15 @@ Questo permette di testare e distribuire l'assistente per scenari completamente 
    npm run dev
    ```
 
-3. Apri il browser su `http://localhost:3000` e inizia a parlare con l'agente!
+3. Apri il browser su `http://localhost:3000`.
+
+4. Nella UI, configura le sorgenti documentali con i due campi separati:
+   * **Summary document (single file):** file usato per generare il riassunto iniziale.
+   * **RAG document(s) (one or more files):** file usati dalla tool `search_documents` durante la conversazione.
+
+5. Regole di comportamento implementate:
+   * Se fornisci **summary + RAG**, vengono usati separatamente.
+   * Se fornisci **solo summary**, lo stesso file viene riutilizzato anche per il RAG.
+   * Se fornisci **solo RAG**, il riassunto iniziale viene saltato e il RAG usa i file caricati.
+
+6. Clicca **Start** per avviare la sessione.

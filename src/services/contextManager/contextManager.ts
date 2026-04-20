@@ -27,7 +27,7 @@ const MEMORY_EXTRACTION_TOKEN_THRESHOLD = parseInt(
   10,
 );
 
-const MEMORY_EXTRACTION_MODEL = process.env.MEMORY_EXTRACTION_MODEL ?? 'gemini-3.1-flash-lite';
+const MEMORY_EXTRACTION_MODEL = process.env.MEMORY_EXTRACTION_MODEL ?? 'gemini-3.1-flash-lite-preview';
 const MEMORY_EXTRACTION_MODEL_BACKUP =
   process.env.MEMORY_EXTRACTION_MODEL_BACKUP ?? 'gemini-2.5-flash-lite';
 
@@ -62,6 +62,8 @@ export interface ContextManagerEvents {
   switchReady: [payload: InjectionPayload];
   /** Fired when an extraction completes (success or failure). */
   extractionDone: [success: boolean, error?: string];
+  /** Fired after a successful extraction with the token counts for that call. */
+  extractionUsage: [inputTokens: number, outputTokens: number];
 }
 
 // ── ContextManager ───────────────────────────────────────────────────────────
@@ -353,7 +355,7 @@ SELF-CHECK before outputting: Count the subtopics the professor mentioned in the
           `[${this.sessionId}] ContextManager: extracting state from ${deltaEntries.length} turns (turns ${this.lastExtractionTurnIndex + 1}..${lastTurnIndex}) using ${modelName}...`,
         );
 
-        const { object } = await generateObject({
+        const { object, usage } = await generateObject({
           model: createGoogleGenerativeAI({ apiKey: process.env.GEMINI_LLM_API_KEY ?? '' })(modelName),
           schema,
           prompt: extractionPrompt,
@@ -361,6 +363,7 @@ SELF-CHECK before outputting: Count the subtopics the professor mentioned in the
 
         extractedObject = object as AnyAssistantState;
         this.lastSuccessfulExtractionModel = modelName;
+        this.emit('extractionUsage', usage.inputTokens ?? 0, usage.outputTokens ?? 0);
         console.log(`[${this.sessionId}] ContextManager: extraction succeeded with ${modelName}.`);
         break;
       } catch (err) {

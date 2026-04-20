@@ -262,6 +262,30 @@ export class SessionLogger {
       } else {
         lines.push(`  Est. cost USD: (pricing env vars not set)`);
       }
+
+      // Doc summary generation cost (only non-zero when cache was cold)
+      lines.push('');
+      lines.push('  DOC SUMMARY GENERATION (LLM, cached after first run)');
+      lines.push('  ' + hr.slice(2));
+      lines.push(`  Input  tokens: ${fmt(costSummary.summaryInputTokens)}`);
+      lines.push(`  Output tokens: ${fmt(costSummary.summaryOutputTokens)}`);
+      if (costSummary.summaryCostUsd !== null) {
+        lines.push(`  Est. cost USD: $${costSummary.summaryCostUsd.toFixed(6)}`);
+      } else {
+        lines.push(`  Est. cost USD: (pricing env vars not set)`);
+      }
+
+      // Context-switch extraction costs
+      lines.push('');
+      lines.push(`  CONTEXT-SWITCH EXTRACTIONS (${costSummary.extractionCount} run${costSummary.extractionCount !== 1 ? 's' : ''})`);
+      lines.push('  ' + hr.slice(2));
+      lines.push(`  Input  tokens: ${fmt(costSummary.extractionInputTokens)}`);
+      lines.push(`  Output tokens: ${fmt(costSummary.extractionOutputTokens)}`);
+      if (costSummary.extractionCostUsd !== null) {
+        lines.push(`  Est. cost USD: $${costSummary.extractionCostUsd.toFixed(6)}`);
+      } else {
+        lines.push(`  Est. cost USD: (pricing env vars not set)`);
+      }
     }
 
     // ── Per-episode sections ──────────────────────────────────────────────
@@ -391,6 +415,17 @@ export class SessionLogger {
             ragEstimated: costSummary.ragTokens,
             ragCalls: costSummary.ragCalls,
             estimatedCostUsd: costSummary.estimatedCostUsd,
+            docSummaryGeneration: {
+              inputTokens: costSummary.summaryInputTokens,
+              outputTokens: costSummary.summaryOutputTokens,
+              estimatedCostUsd: costSummary.summaryCostUsd,
+            },
+            contextSwitchExtractions: {
+              count: costSummary.extractionCount,
+              inputTokens: costSummary.extractionInputTokens,
+              outputTokens: costSummary.extractionOutputTokens,
+              estimatedCostUsd: costSummary.extractionCostUsd,
+            },
           }
         : null,
       episodes: this.episodes.map((ep) => ({

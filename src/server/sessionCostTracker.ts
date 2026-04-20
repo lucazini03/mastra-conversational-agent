@@ -10,6 +10,8 @@ type SessionPricing = {
   textOutputPer1M: number;
   audioInputPer1M: number;
   audioOutputPer1M: number;
+  textInputPer1MLite: number;
+  textOutputPer1MLite: number;
 };
 
 type UsageEventPoint = {
@@ -23,6 +25,7 @@ type UsageEventPoint = {
 type PricingResolution = {
   pricing: SessionPricing;
   configured: boolean;
+  liteConfigured: boolean;
 };
 
 export type SessionCostSummary = {
@@ -40,6 +43,15 @@ export type SessionCostSummary = {
   pricingConfigured: boolean;
   usageEvents: number;
   ragCalls: number;
+  /** Tokens used by the initial document summary LLM call (null → cached, no generation happened). */
+  summaryInputTokens: number;
+  summaryOutputTokens: number;
+  summaryCostUsd: number | null;
+  /** Tokens used by all context-switch memory extraction calls combined. */
+  extractionInputTokens: number;
+  extractionOutputTokens: number;
+  extractionCount: number;
+  extractionCostUsd: number | null;
   growth: {
     shape: 'insufficient_data' | 'linear_like' | 'quadratic_like' | 'sublinear_like';
     firstDeltaInput: number;
@@ -61,6 +73,8 @@ function resolvePricing(): PricingResolution {
   const textOutput = readPriceEnv(process.env.GOOGLE_PRICE_TEXT_OUTPUT_PER_1M);
   const audioInput = readPriceEnv(process.env.GOOGLE_PRICE_AUDIO_INPUT_PER_1M);
   const audioOutput = readPriceEnv(process.env.GOOGLE_PRICE_AUDIO_OUTPUT_PER_1M);
+  const textInputLite = readPriceEnv(process.env.GOOGLE_PRICE_TEXT_INPUT_PER_1M_LITE);
+  const textOutputLite = readPriceEnv(process.env.GOOGLE_PRICE_TEXT_OUTPUT_PER_1M_LITE);
 
   const configured =
     textInput !== null &&
@@ -68,13 +82,18 @@ function resolvePricing(): PricingResolution {
     audioInput !== null &&
     audioOutput !== null;
 
+  const liteConfigured = textInputLite !== null && textOutputLite !== null;
+
   return {
     configured,
+    liteConfigured,
     pricing: {
       textInputPer1M: textInput ?? 0,
       textOutputPer1M: textOutput ?? 0,
       audioInputPer1M: audioInput ?? 0,
       audioOutputPer1M: audioOutput ?? 0,
+      textInputPer1MLite: textInputLite ?? 0,
+      textOutputPer1MLite: textOutputLite ?? 0,
     },
   };
 }
@@ -94,6 +113,15 @@ export class SessionCostTracker {
   private sessionStartedAtMs = Date.now();
   private usageHistory: UsageEventPoint[] = [];
 
+  /** Tokens spent on the initial document-summary LLM call (0 when served from disk cache). */
+  private summaryInputTokens = 0;
+  private summaryOutputTokens = 0;
+
+  /** Tokens spent on each context-switch memory extraction call. */
+  private extractionInputTokens = 0;
+  private extractionOutputTokens = 0;
+  private extractionCount = 0;
+
   reset() {
     this.usageTotals = { inputText: 0, inputAudio: 0, outputText: 0, outputAudio: 0 };
     this.usageEventsSeen = 0;
@@ -101,6 +129,24 @@ export class SessionCostTracker {
     this.ragEstimatedTokens = 0;
     this.sessionStartedAtMs = Date.now();
     this.usageHistory = [];
+    this.summaryInputTokens = 0;
+    this.summaryOutputTokens = 0;
+    this.extractionInputTokens = 0;
+    this.extractionOutputTokens = 0;
+    this.extractionCount = 0;
+  }
+
+  /** Record tokens used by the initial document-summary LLM call. */
+  recordSummaryUsage(inputTokens: number, outputTokens: number): void {
+    this.summaryInputTokens += inputTokens;
+    this.summaryOutputTokens += outputTokens;
+  }
+
+  /** Record tokens used by one context-switch memory extraction call. */
+  recordExtractionUsage(inputTokens: number, outputTokens: number): void {
+    this.extractionInputTokens += inputTokens;
+    this.extractionOutputTokens += outputTokens;
+    this.extractionCount++;
   }
 
   /** Returns a snapshot of input token totals for threshold checks. */
@@ -188,6 +234,16 @@ export class SessionCostTracker {
       ? inputCostUsd + outputCostUsd
       : null;
 
+    const summaryCostUsd = PRICING.liteConfigured
+      ? (this.summaryInputTokens / 1_000_000) * PRICING.pricing.textInputPer1MLite +
+        (this.summaryOutputTokens / 1_000_000) * PRICING.pricing.textOutputPer1MLite
+      : null;
+
+    const extractionCostUsd = PRICING.liteConfigured
+      ? (this.extractionInputTokens / 1_000_000) * PRICING.pricing.textInputPer1MLite +
+        (this.extractionOutputTokens / 1_000_000) * PRICING.pricing.textOutputPer1MLite
+      : null;
+
     const summary: SessionCostSummary = {
       inputTokens,
       outputTokens,
@@ -203,6 +259,13 @@ export class SessionCostTracker {
       pricingConfigured: PRICING.configured,
       usageEvents: this.usageEventsSeen,
       ragCalls: this.ragCalls,
+      summaryInputTokens: this.summaryInputTokens,
+      summaryOutputTokens: this.summaryOutputTokens,
+      summaryCostUsd,
+      extractionInputTokens: this.extractionInputTokens,
+      extractionOutputTokens: this.extractionOutputTokens,
+      extractionCount: this.extractionCount,
+      extractionCostUsd,
       growth,
     };
 

@@ -1,13 +1,11 @@
 import { createHash } from 'node:crypto';
-import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { embed, embedMany } from 'ai';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { DuckDBVector } from '@mastra/duckdb';
 import { MDocument } from '@mastra/rag';
-import { PDFParse } from 'pdf-parse';
+import { parseDocumentFile } from './documentFileUtils.js';
 
-const DEFAULT_RAG_DOCS_DIR = path.join(process.cwd(), 'rag-docs');
 const DEFAULT_RAG_DB_PATH = path.join(process.cwd(), 'rag.duckdb');
 const DEFAULT_RAG_INDEX = 'pdf_knowledge';
 const DEFAULT_RAG_QUERY_TOP_K = 5;
@@ -63,7 +61,7 @@ type RagScoredSource = {
 };
 
 export class BrowserRagService {
-  private readonly docsDir: string;
+  private readonly documentPaths: string[];
   private readonly indexName: string;
   private readonly vectorStore: DuckDBVector;
   private readonly google: ReturnType<typeof createGoogleGenerativeAI>;
@@ -72,18 +70,18 @@ export class BrowserRagService {
   //embeddingModel will hold the instance of the embedding model once it's initialized. It starts as null and is set in the ensureEmbeddingToolReady method, which tries to find a compatible embedding model from the Google Generative AI client.
   private initPromise: Promise<RAGInitState> | null = null;
 
-  constructor() {
+  constructor(options: { documentPaths: string[]; indexSuffix?: string }) {
         const apiKey = process.env.GEMINI_EMBEDDING_API_KEY; // because we are going to use gemini's embedding models
         if (!apiKey) {
           throw new Error('GEMINI_EMBEDDING_API_KEY is required for RAG embeddings.');
         }
 
-        this.docsDir = process.env.RAG_DOCS_DIR
-          ? path.resolve(process.env.RAG_DOCS_DIR)
-          : DEFAULT_RAG_DOCS_DIR;
-        // if RAG_DOCS_DIR is set in the environment, use that (after resolving to an absolute path), otherwise use the default directory "rag-docs" in the current working directory.
+        this.documentPaths = [...new Set(options.documentPaths.map((p) => path.resolve(p)))].sort();
 
-        this.indexName = process.env.RAG_INDEX_NAME ?? DEFAULT_RAG_INDEX;
+        const configuredIndexName = process.env.RAG_INDEX_NAME ?? DEFAULT_RAG_INDEX;
+        this.indexName = options.indexSuffix
+          ? `${configuredIndexName}_${options.indexSuffix}`
+          : configuredIndexName;
         // if RAG_INDEX_NAME is set in the environment, use that, otherwise use the default index name "pdf_knowledge".
         // the index name is used to identify the collection of vectors in the vector store, allowing us to manage multiple collections if needed.
 
@@ -198,32 +196,18 @@ export class BrowserRagService {
       throw new Error('RAG embedding model is not initialized.');
     }
 
-    await fs.mkdir(this.docsDir, { recursive: true });
-
-    const allEntries = await fs.readdir(this.docsDir, { withFileTypes: true });
-    const pdfFiles = allEntries
-      .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.pdf'))
-      .map((entry) => path.join(this.docsDir, entry.name));
-
-    if (pdfFiles.length === 0) {
-      console.log(`[RAG] No PDF files found in ${this.docsDir}. RAG disabled.`);
+    if (this.documentPaths.length === 0) {
+      console.log('[RAG] No documents selected for RAG. RAG disabled.');
       return { ready: false, docCount: 0 };
     }
 
     const chunks: Array<{ text: string; metadata: Record<string, unknown> }> = [];
 
-    for (const filePath of pdfFiles) {
+    for (const filePath of this.documentPaths) {
       const fileName = path.basename(filePath);
       try {
-        const raw = await fs.readFile(filePath);
-        const parser = new PDFParse({ data: raw });
-        let parsed;
-        try {
-          parsed = await parser.getText();
-        } finally {
-          await parser.destroy();
-        }
-        const normalizedText = parsed.text.replace(/\s+/g, ' ').trim();
+        const parsed = await parseDocumentFile(filePath);
+        const normalizedText = parsed?.normalizedText ?? '';
 
         if (!normalizedText) continue;
 
@@ -263,7 +247,7 @@ export class BrowserRagService {
     }
 
     if (chunks.length === 0) {
-      console.warn(`[RAG] PDFs found in ${this.docsDir}, but no readable text was extracted.`);
+      console.warn('[RAG] Documents were selected, but no readable text was extracted.');
       return { ready: false, docCount: 0 };
     }
 
@@ -307,7 +291,7 @@ export class BrowserRagService {
     });
 
     const sourceFileCount = new Set(chunks.map((c) => String(c.metadata.sourceFile))).size;
-    console.log(`[RAG] Indexed ${chunks.length} chunks from ${sourceFileCount} PDF files (${this.docsDir}).`);
+    console.log(`[RAG] Indexed ${chunks.length} chunks from ${sourceFileCount} document files.`);
 
     return { ready: true, docCount: sourceFileCount };
   }
@@ -343,5 +327,3 @@ export class BrowserRagService {
     );
   }
 }
-
-export const browserRagService = new BrowserRagService();

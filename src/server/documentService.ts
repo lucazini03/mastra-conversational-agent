@@ -1,7 +1,7 @@
 // src/server/documentService.ts
 //
 // Singleton service responsible for:
-//   1. Reading PDF files from rag-docs/, extracting and normalising text.
+//   1. Reading selected files (PDF/TXT/MD), extracting and normalising text.
 //   2. Computing a stable SHA-256 hash of the combined content.
 //   3. Generating (and caching to disk) an LLM document summary used to
 //      inject a topic-constraint into agent instructions at session start,
@@ -16,8 +16,8 @@ import path from 'node:path';
 
 import { generateObject } from 'ai';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
-import { PDFParse } from 'pdf-parse';
 import { z } from 'zod';
+import { parseDocumentFile } from './documentFileUtils.js';
 
 // ── Schema & types ────────────────────────────────────────────────────────────
 
@@ -45,9 +45,14 @@ export type DocsContent = {
   files: Array<{ name: string; normalizedText: string }>;
 };
 
+export type SummaryResult = {
+  index: DocumentIndex | null;
+  /** Non-null only when generation ran (not served from disk cache). */
+  generationTokens: { input: number; output: number } | null;
+};
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const DEFAULT_DOCS_DIR = path.join(process.cwd(), 'rag-docs');
 const SUMMARIES_DIR = path.join(process.cwd(), 'logs', 'summaries');
 
 // ── Service ───────────────────────────────────────────────────────────────────
@@ -55,8 +60,8 @@ const SUMMARIES_DIR = path.join(process.cwd(), 'logs', 'summaries');
 class DocumentService {
   private googleClient: ReturnType<typeof createGoogleGenerativeAI> | null = null;
 
-  /** In-memory cache — cleared on process restart (i.e. per deploy). */
-  private cachedContent: DocsContent | null = null;
+  /** In-memory cache by sorted file-path list, cleared on process restart. */
+  private contentCache = new Map<string, DocsContent>();
 
   // ─── Helpers ─────────────────────────────────────────────────────────────
 
@@ -73,52 +78,24 @@ class DocumentService {
 
   // ─── Public API ──────────────────────────────────────────────────────────
 
-  /**
-   * Reads every PDF from rag-docs/, extracts normalised text via pdf-parse,
-   * and returns a stable hash + combined text + per-file breakdown.
-   *
-   * Results are cached in memory for the process lifetime so repeated calls
-   * (from ragService & sessionHandler) incur no I/O cost.
-   */
-  async getDocumentsHashAndText(): Promise<DocsContent> {
-    if (this.cachedContent) return this.cachedContent;
-
-    const docsDir = process.env.RAG_DOCS_DIR
-      ? path.resolve(process.env.RAG_DOCS_DIR)
-      : DEFAULT_DOCS_DIR;
-
-    await fs.mkdir(docsDir, { recursive: true });
-
-    const entries = await fs.readdir(docsDir, { withFileTypes: true });
-
-    // Sort for a stable hash regardless of filesystem ordering.
-    const pdfPaths = entries
-      .filter((e) => e.isFile() && e.name.toLowerCase().endsWith('.pdf'))
-      .map((e) => path.join(docsDir, e.name))
-      .sort();
-
-    if (pdfPaths.length === 0) {
-      const empty: DocsContent = { hash: 'no-docs', text: '', files: [] };
-      this.cachedContent = empty;
-      return empty;
+  async getDocumentsHashAndText(documentPaths: string[]): Promise<DocsContent> {
+    const normalizedPaths = [...new Set(documentPaths.map((p) => path.resolve(p)))].sort();
+    if (normalizedPaths.length === 0) {
+      return { hash: 'no-docs', text: '', files: [] };
     }
+
+    const cacheKey = normalizedPaths.join('|');
+    const cached = this.contentCache.get(cacheKey);
+    if (cached) return cached;
 
     const files: Array<{ name: string; normalizedText: string }> = [];
 
-    for (const filePath of pdfPaths) {
+    for (const filePath of normalizedPaths) {
       const name = path.basename(filePath);
       try {
-        const raw = await fs.readFile(filePath);
-        const parser = new PDFParse({ data: raw });
-        let parsed;
-        try {
-          parsed = await parser.getText();
-        } finally {
-          await parser.destroy();
-        }
-        const normalizedText = parsed.text.replace(/\s+/g, ' ').trim();
-        if (normalizedText) {
-          files.push({ name, normalizedText });
+        const parsed = await parseDocumentFile(filePath);
+        if (parsed?.normalizedText) {
+          files.push({ name: parsed.name, normalizedText: parsed.normalizedText });
         }
       } catch (err) {
         console.warn(
@@ -128,14 +105,23 @@ class DocumentService {
       }
     }
 
+    if (files.length === 0) {
+      const empty: DocsContent = { hash: 'no-docs', text: '', files: [] };
+      this.contentCache.set(cacheKey, empty);
+      return empty;
+    }
+
     const combinedText = files.map((f) => f.normalizedText).join('\n\n');
     const hash = createHash('sha256').update(combinedText).digest('hex');
 
-    this.cachedContent = { hash, text: combinedText, files };
+    const result: DocsContent = { hash, text: combinedText, files };
+    this.contentCache.set(cacheKey, result);
+
     console.log(
-      `[DocumentService] Loaded ${files.length} PDF(s), hash ${hash.slice(0, 12)}...`,
+      `[DocumentService] Loaded ${files.length} document(s), hash ${hash.slice(0, 12)}...`,
     );
-    return this.cachedContent;
+
+    return result;
   }
 
   /**
@@ -143,10 +129,11 @@ class DocumentService {
    * On a cache miss, generates one via Gemini and persists it to
    * logs/summaries/<hash>_summary.json so subsequent startups are instant.
    *
-   * Returns null if no documents are loaded or generation fails.
+   * Returns a `SummaryResult` where `generationTokens` is non-null only when
+   * an actual LLM call was made (cache miss). Callers can use this to track costs.
    */
-  async getOrGenerateSummary(hash: string, fullText: string): Promise<DocumentIndex | null> {
-    if (!fullText || hash === 'no-docs') return null;
+  async getOrGenerateSummary(hash: string, fullText: string): Promise<SummaryResult> {
+    if (!fullText || hash === 'no-docs') return { index: null, generationTokens: null };
 
     await fs.mkdir(SUMMARIES_DIR, { recursive: true });
     const cacheFile = path.join(SUMMARIES_DIR, `${hash}_summary.json`);
@@ -157,7 +144,7 @@ class DocumentService {
       const parsed = DocumentIndexSchema.safeParse(JSON.parse(raw));
       if (parsed.success) {
         console.log(`[DocumentService] Summary cache hit (hash ${hash.slice(0, 12)}...)`);
-        return parsed.data;
+        return { index: parsed.data, generationTokens: null };
       }
     } catch {
       // File absent or corrupt — fall through to generation.
@@ -169,7 +156,7 @@ class DocumentService {
       const google = this.getGoogleClient();
       const model = google('gemini-3.1-flash-lite-preview');
 
-      const { object } = await generateObject({
+      const { object, usage } = await generateObject({
         model,
         schema: DocumentIndexSchema,
         prompt: [
@@ -184,13 +171,16 @@ class DocumentService {
 
       await fs.writeFile(cacheFile, JSON.stringify(object, null, 2), 'utf-8');
       console.log(`[DocumentService] Summary saved to ${cacheFile}`);
-      return object;
+      return {
+        index: object,
+        generationTokens: { input: usage.inputTokens ?? 0, output: usage.outputTokens ?? 0 },
+      };
     } catch (err) {
       console.error(
         '[DocumentService] Summary generation failed:',
         err instanceof Error ? err.message : String(err),
       );
-      return null;
+      return { index: null, generationTokens: null };
     }
   }
 }

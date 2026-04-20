@@ -5,7 +5,7 @@
 //   Browser mic PCM → GeminiLive → Browser speaker PCM
 //
 // Protocol (all text frames, JSON):
-//   Browser → Server  { type: 'start_session' }
+//   Browser → Server  { type: 'start_session', assistantId?: string, documentConfigId?: string }
 //   Browser → Server  { type: 'end_session' }
 //   Browser → Server  { type: 'audio_chunk', data: string }   ← base64 Int16 PCM, 16kHz mono
 //   Browser → Server  { type: 'text_prompt', text: string }
@@ -16,6 +16,7 @@
 //   Server  → Browser { type: 'tts_audio',  data: string }    ← base64 Int16 PCM, 24kHz mono
 
 import { WebSocket, type RawData } from 'ws';
+import { rm } from 'node:fs/promises';
 import { createProfessorAgent, type ProfessorAgent } from '../agent/agentFactory.js';
 import {
   DEFAULT_ASSISTANT_ID,
@@ -23,12 +24,13 @@ import {
   isAssistantId,
   type AssistantId,
 } from '../config/professorConfig.js';
-import { browserRagService } from './ragService.js';
-import { documentService, type DocumentIndex } from './documentService.js';
+import { BrowserRagService } from './ragService.js';
+import { documentService } from './documentService.js';
 import { SessionCostTracker } from './sessionCostTracker.js';
 import { SessionLogger } from './sessionLogger.js';
 import { ContextManager, type InjectionPayload, type AnyAssistantState } from '../services/contextManager/index.js';
 import { appendSessionToLog } from './usageTracker.js';
+import type { UploadedDocumentConfig } from './documentConfigStore.js';
 
 // How long to wait before attempting a reconnect after Google drops the line.
 // Keep this short (1-2 s) so the user barely notices the gap.
@@ -42,6 +44,10 @@ const MAX_RECONNECT_ATTEMPTS = 5;
 // (per Google docs), but we never need to hold them longer than the lifetime
 // of this SessionHandler, so no expiry logic is required here.
 
+type SessionHandlerDeps = {
+  consumeDocumentConfig: (configId: string) => Promise<UploadedDocumentConfig | null>;
+};
+
 export class SessionHandler {
   private ws: WebSocket;
   private professor: ProfessorAgent | null = null;
@@ -53,6 +59,11 @@ export class SessionHandler {
   private costTracker = new SessionCostTracker();
   private sessionCostSummarySent = false;
   private selectedAssistantId: AssistantId = DEFAULT_ASSISTANT_ID;
+  private selectedSummaryFiles: string[] = [];
+  private selectedRagFiles: string[] = [];
+  private uploadedDocumentDir: string | null = null;
+  private ragService: BrowserRagService | null = null;
+  private readonly deps: SessionHandlerDeps;
 
   // ── Document summary injected into instructions at session start ─────────
   // Contains the topic-constraint block appended to base instructions for
@@ -81,9 +92,10 @@ export class SessionHandler {
   private geminiWs: WebSocket | null = null;
   private geminiWsMessageListener: ((data: RawData) => void) | null = null;
 
-  constructor(ws: WebSocket, sessionId: string) {
+  constructor(ws: WebSocket, sessionId: string, deps: SessionHandlerDeps) {
     this.ws = ws;
     this.sessionId = sessionId;
+    this.deps = deps;
     this.setupWebSocketListeners();
     console.log(`[${this.sessionId}] Session created`);
   }
@@ -128,7 +140,13 @@ export class SessionHandler {
   // ─── Control Messages ───────────────────────────────────────────────────────
 
   private async handleControlMessage(raw: string) {
-    let msg: { type: string; data?: string; text?: string; assistantId?: string };
+    let msg: {
+      type: string;
+      data?: string;
+      text?: string;
+      assistantId?: string;
+      documentConfigId?: string;
+    };
     try {
       msg = JSON.parse(raw);
     } catch {
@@ -139,7 +157,7 @@ export class SessionHandler {
     switch (msg.type) {
       case 'start_session':
         this.selectedAssistantId = this.resolveAssistantId(msg.assistantId);
-        await this.startSession();
+        await this.startSession(msg.documentConfigId);
         break;
       case 'end_session':
         this.intentionalClose = true;
@@ -215,11 +233,35 @@ export class SessionHandler {
 
   // ─── Session Lifecycle ──────────────────────────────────────────────────────
 
-  private async startSession() {
+  private async startSession(documentConfigId?: string) {
     if (this.professor || this.isStarting) {
       this.sendStatus('Session already active');
       return;
     }
+
+    const uploadConfig = await this.resolveUploadConfig(documentConfigId);
+    if (documentConfigId && !uploadConfig) {
+      this.sendJSON({
+        type: 'error',
+        message: 'La selezione documenti e scaduta. Seleziona di nuovo i file e riavvia la sessione.',
+      });
+      return;
+    }
+
+    const summaryFiles = uploadConfig?.summaryFiles ?? [];
+    const explicitRagFiles = uploadConfig?.ragFiles ?? [];
+    const effectiveRagFiles = explicitRagFiles.length > 0 ? explicitRagFiles : [...summaryFiles];
+
+    this.uploadedDocumentDir = uploadConfig?.uploadDir ?? null;
+    this.selectedSummaryFiles = summaryFiles;
+    this.selectedRagFiles = effectiveRagFiles;
+    this.ragService =
+      this.selectedRagFiles.length > 0
+        ? new BrowserRagService({
+            documentPaths: this.selectedRagFiles,
+            indexSuffix: this.sessionId,
+          })
+        : null;
 
     this.intentionalClose = false;
     this.reconnectAttempts = 0;
@@ -230,12 +272,14 @@ export class SessionHandler {
     let instructions = getAssistantInstructions(this.selectedAssistantId);
     let initialState: AnyAssistantState | null = null;
     try {
-      // getDocumentsHashAndText() is in-memory cached after ragService.ensureReady()
-      // runs at startup, so this await is effectively instantaneous.
-      const { hash, text } = await documentService.getDocumentsHashAndText();
-      // getOrGenerateSummary() returns from the disk cache (also pre-warmed) so
-      // it does NOT block WebSocket startup with an LLM call.
-      const docSummary: DocumentIndex | null = await documentService.getOrGenerateSummary(hash, text);
+      const hasSummaryDocs = this.selectedSummaryFiles.length > 0;
+      const summarySourceFiles = hasSummaryDocs ? this.selectedSummaryFiles : [];
+      const { hash, text } = await documentService.getDocumentsHashAndText(summarySourceFiles);
+      const { index: docSummary, generationTokens: summaryTokens } =
+        await documentService.getOrGenerateSummary(hash, text);
+      if (summaryTokens) {
+        this.costTracker.recordSummaryUsage(summaryTokens.input, summaryTokens.output);
+      }
       if (
         docSummary &&
         (this.selectedAssistantId === 'professor' || this.selectedAssistantId === 'audioguide')
@@ -304,6 +348,9 @@ export class SessionHandler {
       this.contextManager.setInitialState(initialState);
     }
     this.contextManager.on('switchReady', (payload) => this.handleContextSwitch(payload));
+    this.contextManager.on('extractionUsage', (inputTokens, outputTokens) => {
+      this.costTracker.recordExtractionUsage(inputTokens, outputTokens);
+    });
 
     // Initialise session file logger (writes to logs/sessions/ on teardown).
     this.sessionLogger = new SessionLogger(this.sessionId, this.selectedAssistantId);
@@ -327,7 +374,7 @@ export class SessionHandler {
     try {
       if (!isReconnect) {
         this.sendStatus(`Connecting to ${this.getAssistantLabel(this.selectedAssistantId)}...`);
-        void browserRagService.ensureReady().catch((err) => {
+        void this.ragService?.ensureReady().catch((err) => {
           const msg = err instanceof Error ? err.message : String(err);
           console.warn(`[${this.sessionId}] RAG warmup failed:`, msg);
         });
@@ -917,9 +964,19 @@ export class SessionHandler {
             return { result: 'Errore: query vuota.', sources: [] };
           }
 
+          if (!this.ragService) {
+            this.sendStatus('RAG: nessun documento selezionato per la ricerca.');
+            return {
+              result:
+                'Nessun documento RAG disponibile in questa sessione. Carica almeno un documento nel campo RAG o Summary prima di avviare.',
+              sources: [],
+              scores: [],
+            };
+          }
+
           this.sendStatus(`RAG: ricerca nei documenti per "${query}"`);
 
-          const { relevantContext, sources, scoredSources } = await browserRagService.queryRelevantContext(query, 5);
+          const { relevantContext, sources, scoredSources } = await this.ragService.queryRelevantContext(query, 5);
 
           this.sendJSON({
             type: 'rag_tool_called',
@@ -994,6 +1051,7 @@ export class SessionHandler {
     this.pendingTtsByte = null;
     this.pendingTextPrompts = [];
     this.isReconnecting = false;
+    this.ragService = null;
 
     if (this.contextManager) {
       this.contextManager.removeAllListeners();
@@ -1012,8 +1070,27 @@ export class SessionHandler {
       console.log(`[${this.sessionId}] Professor agent destroyed`);
     }
 
+    if (this.uploadedDocumentDir) {
+      try {
+        await rm(this.uploadedDocumentDir, { recursive: true, force: true });
+      } catch {
+        // Best-effort cleanup of temporary uploads.
+      }
+      this.uploadedDocumentDir = null;
+      this.selectedSummaryFiles = [];
+      this.selectedRagFiles = [];
+    }
+
     // Wait for the session log file to finish writing.
     await sessionLogPromise;
+  }
+
+  private async resolveUploadConfig(
+    documentConfigId?: string,
+  ): Promise<UploadedDocumentConfig | null> {
+    const normalizedId = documentConfigId?.trim();
+    if (!normalizedId) return null;
+    return this.deps.consumeDocumentConfig(normalizedId);
   }
 
   private emitSessionCostSummary() {
@@ -1039,6 +1116,14 @@ export class SessionHandler {
     console.log(
       `[${this.sessionId}] RAG Tokens (subset of input): ${summary.ragTokens.toLocaleString()} (${summary.ragCostUsd === null ? 'N/A' : `~$${summary.ragCostUsd.toFixed(6)}`}) ` +
         `[calls=${summary.ragCalls}]`,
+    );
+    console.log(
+      `[${this.sessionId}] Doc Summary Generation: input=${summary.summaryInputTokens.toLocaleString()}, output=${summary.summaryOutputTokens.toLocaleString()} ` +
+        `(${summary.summaryCostUsd === null ? 'N/A' : `$${summary.summaryCostUsd.toFixed(6)}`}) [0 = served from cache]`,
+    );
+    console.log(
+      `[${this.sessionId}] Context-Switch Extractions (${summary.extractionCount}): input=${summary.extractionInputTokens.toLocaleString()}, output=${summary.extractionOutputTokens.toLocaleString()} ` +
+        `(${summary.extractionCostUsd === null ? 'N/A' : `$${summary.extractionCostUsd.toFixed(6)}`})`,
     );
     console.log(
       `[${this.sessionId}] Growth: ${summary.growth.shape} ` +
