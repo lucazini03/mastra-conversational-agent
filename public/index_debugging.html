@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MemorAIz Assistant</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;800&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/index_debugging.css" />
+  </head>
+  <body>
+    <main class="shell">
+
+      <!-- Header -->
+      <header class="header">
+        <div class="logo-mark">
+          <svg width="30" height="30" viewBox="0 0 30 30" fill="none">
+            <circle cx="15" cy="15" r="10" stroke="#38bdf8" stroke-width="1.5" opacity="0.4"/>
+            <circle cx="15" cy="15" r="5" fill="#38bdf8" opacity="0.8"/>
+            <line x1="15" y1="5" x2="15" y2="2" stroke="#38bdf8" stroke-width="1.5" stroke-linecap="round" opacity="0.6"/>
+            <line x1="23.7" y1="8.3" x2="25.9" y2="6.1" stroke="#38bdf8" stroke-width="1.5" stroke-linecap="round" opacity="0.4"/>
+            <line x1="25" y1="15" x2="28" y2="15" stroke="#38bdf8" stroke-width="1.5" stroke-linecap="round" opacity="0.4"/>
+          </svg>
+        </div>
+        <div class="header-text">
+          <h1 class="title">MemorAIz</h1>
+          <p class="subtitle">Real-time AI assistant &mdash; speech-to-speech</p>
+        </div>
+        <div class="timer-group" aria-label="Conversation timers">
+          <span class="timer-chip persistent"><span class="timer-label">Session</span><span class="timer-value" id="conversationTimer">00:00</span></span>
+          <span class="timer-chip resettable"><span class="timer-label">Reconn.</span><span class="timer-value" id="connectionTimer">00:00</span></span>
+        </div>
+        <span class="version-badge">v2.0 live</span>
+      </header>
+
+      <!-- Main Grid -->
+      <div class="main-grid">
+
+        <!-- Left: Robot + controls -->
+        <div style="display:flex;flex-direction:column;gap:14px;">
+
+          <!-- Robot panel -->
+          <div class="panel" style="position:relative;">
+            <div class="panel-header">
+              <div class="panel-header-dot"></div>
+              AI Agent
+            </div>
+            <div class="avatar-panel">
+              <!-- Rings -->
+              <div class="robot-container" id="robotContainer">
+                <div class="robot-ring" id="robotRing"></div>
+                <div class="robot-ring-2" id="robotRing2"></div>
+                <div class="robot-svg-wrap">
+                  <!-- Robot SVG Face -->
+                  <svg width="100" height="100" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg" id="robotSvg">
+                    <!-- Head -->
+                    <rect x="20" y="22" width="60" height="52" rx="10" fill="#0f2040" stroke="#38bdf8" stroke-width="1.2" stroke-opacity="0.6"/>
+                    <!-- Antenna -->
+                    <line x1="50" y1="22" x2="50" y2="10" stroke="#38bdf8" stroke-width="1.5" stroke-opacity="0.7"/>
+                    <circle cx="50" cy="8" r="3.5" fill="#38bdf8" opacity="0.9" id="antennaGlow"/>
+                    <!-- Eyes -->
+                    <rect x="30" y="36" width="14" height="10" rx="3" fill="#38bdf8" opacity="0.15" id="eyeLeftBg"/>
+                    <rect x="56" y="36" width="14" height="10" rx="3" fill="#38bdf8" opacity="0.15" id="eyeRightBg"/>
+                    <rect x="32" y="38" width="10" height="6" rx="2" fill="#38bdf8" id="eyeLeft"/>
+                    <rect x="58" y="38" width="10" height="6" rx="2" fill="#38bdf8" id="eyeRight"/>
+                    <!-- Pupils -->
+                    <rect x="36" y="39.5" width="3" height="3" rx="1" fill="#0a1628" id="pupilLeft"/>
+                    <rect x="62" y="39.5" width="3" height="3" rx="1" fill="#0a1628" id="pupilRight"/>
+                    <!-- Mouth / speaker grill -->
+                    <rect x="31" y="56" width="38" height="10" rx="4" fill="#0a1628" stroke="#38bdf8" stroke-width="0.8" stroke-opacity="0.4"/>
+                    <rect x="35" y="59" width="4" height="4" rx="1" fill="#38bdf8" opacity="0.5" id="m1"/>
+                    <rect x="42" y="59" width="4" height="4" rx="1" fill="#38bdf8" opacity="0.5" id="m2"/>
+                    <rect x="49" y="59" width="4" height="4" rx="1" fill="#38bdf8" opacity="0.5" id="m3"/>
+                    <rect x="56" y="59" width="4" height="4" rx="1" fill="#38bdf8" opacity="0.5" id="m4"/>
+                    <!-- Ears -->
+                    <rect x="12" y="36" width="8" height="14" rx="3" fill="#0f2040" stroke="#38bdf8" stroke-width="1" stroke-opacity="0.4"/>
+                    <rect x="80" y="36" width="8" height="14" rx="3" fill="#0f2040" stroke="#38bdf8" stroke-width="1" stroke-opacity="0.4"/>
+                    <!-- Signal bars (hidden by default) -->
+                    <rect x="14" y="45" width="4" height="2" rx="1" fill="#38bdf8" opacity="0.5" id="earBarL"/>
+                    <rect x="82" y="45" width="4" height="2" rx="1" fill="#38bdf8" opacity="0.5" id="earBarR"/>
+                    <!-- Neck detail -->
+                    <rect x="42" y="74" width="16" height="5" rx="2" fill="#0f2040" stroke="#38bdf8" stroke-width="0.8" stroke-opacity="0.3"/>
+                    <rect x="44" y="75.5" width="12" height="2" rx="1" fill="#38bdf8" opacity="0.3"/>
+                  </svg>
+                </div>
+              </div>
+
+              <!-- Sound bars -->
+              <div class="sound-bars" id="soundBars">
+                <div class="bar" style="height:6px"></div>
+                <div class="bar" style="height:16px"></div>
+                <div class="bar" style="height:10px"></div>
+                <div class="bar" style="height:22px"></div>
+                <div class="bar" style="height:8px"></div>
+                <div class="bar" style="height:18px"></div>
+                <div class="bar" style="height:12px"></div>
+              </div>
+
+              <p class="status-text" id="status">Idle</p>
+            </div>
+          </div>
+
+          <!-- Assistant selector -->
+          <div class="panel">
+            <div class="panel-header">
+              <div class="panel-header-dot" style="background:#7c3aed;box-shadow:0 0 6px #7c3aed;"></div>
+              Select assistant
+            </div>
+            <div class="assistant-picker" id="assistantPicker"></div>
+          </div>
+
+          <!-- Controls -->
+          <div class="panel">
+            <div class="panel-header">
+              <div class="panel-header-dot" style="background:#f59e0b;box-shadow:0 0 6px #f59e0b;"></div>
+              Document Sources
+            </div>
+            <div class="doc-config">
+              <label class="doc-field" for="summaryDocInput">
+                <span class="doc-label">Summary document (single file)</span>
+                <input class="doc-input" id="summaryDocInput" type="file" accept=".pdf,.txt,.md,.markdown,.text" />
+                <span class="doc-hint">Used to generate initial summary/topic map for the session.</span>
+              </label>
+
+              <label class="doc-field" for="ragDocInput">
+                <span class="doc-label">RAG document(s) (one or more files)</span>
+                <input class="doc-input" id="ragDocInput" type="file" accept=".pdf,.txt,.md,.markdown,.text" multiple />
+                <span class="doc-hint">Used by search_documents tool during conversation. If empty, summary file is reused for RAG.</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="controls-row">
+              <button id="startBtn">&#9654; Start</button>
+              <button id="stopBtn" disabled>&#9632; End</button>
+              <button id="testBtn" disabled>&#x21bb; Test</button>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- Right: Transcript + System log -->
+        <div class="right-col">
+          <div class="logs-grid">
+
+            <!-- Transcript -->
+            <div class="log-box">
+              <div class="log-header">
+                <div class="log-header-accent" style="background:var(--accent);box-shadow:0 0 5px var(--accent);"></div>
+                Conversation
+              </div>
+              <div class="log-scroll" id="transcriptLog">
+                <div class="empty-state" id="transcriptEmpty">No conversation yet.</div>
+              </div>
+            </div>
+
+            <!-- System log -->
+            <div class="log-box">
+              <div class="log-header">
+                <div class="log-header-accent" style="background:var(--muted);"></div>
+                System log
+              </div>
+              <div class="log-scroll" id="systemLog">
+                <div class="empty-state" id="systemEmpty">No events yet.</div>
+              </div>
+            </div>
+
+          </div>
+
+          <!-- Composer -->
+          <div class="panel">
+            <div class="composer-panel">
+              <input id="chatInput" type="text" placeholder="Type a message..." disabled />
+              <button id="sendBtn" disabled>Send</button>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+    </main>
+
+    <script src="/ort.min.js"></script>
+    <script src="/vad.bundle.min.js"></script>
+    <script src="/index_debugging.js"></script>
+  </body>
+</html>

@@ -562,7 +562,7 @@ export class SessionHandler {
         }
       });
 
-      this.attachRagTool(voice);
+      if (this.ragService) this.attachRagTool(voice);
 
       // ── Connect ────────────────────────────────────────────────────────────
       await voice.connect();
@@ -772,7 +772,7 @@ export class SessionHandler {
         if (!this.intentionalClose) this.scheduleReconnect();
       });
 
-      this.attachRagTool(voice);
+      if (this.ragService) this.attachRagTool(voice);
       await voice.connect();
       this.attachGeminiMessageSpy(voice);
 
@@ -1304,10 +1304,10 @@ export class SessionHandler {
       // Check if we have documents (RAG mode) or not (FREE_ROAM mode).
       if (this.selectedRagFiles.length > 0 || this.selectedSummaryFiles.length > 0) {
         // RAG mode: syllabus is already in the instructions from the document summary.
-        return `Hai gia il PROGRAMMA nelle tue istruzioni — NON chiamare search_documents adesso. Presentati come "il professore di [materia]" (deducila dal programma) e chiedi allo studente il suo nome e il suo livello di istruzione. Sii diretto e formale, ma non freddo.`;
+        return `Hai gia il PROGRAMMA nelle tue istruzioni — NON chiamare search_documents adesso. Presentati come "il professore di [materia]" (deducila dal programma) e chiedi allo studente il suo nome. Sii diretto e formale, ma non freddo.`;
       } else {
         // FREE_ROAM mode: no documents, ask the student what they want to study.
-        return `Presentati come il professore. Chiedi allo studente il suo nome, il suo livello di istruzione (liceo, università, ecc.) e su cosa vuole essere interrogato oggi. Sii diretto e formale, ma non freddo.`;
+        return `Presentati come il professore. Chiedi allo studente il suo nome, e su cosa vuole essere interrogato oggi. Sii diretto e formale, ma non freddo.`;
       }
 
     case 'interview_coach':
