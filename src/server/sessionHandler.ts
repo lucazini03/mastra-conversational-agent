@@ -64,6 +64,10 @@ export class SessionHandler {
   private pendingMicByte: Buffer | null = null;
   private pendingTtsByte: Buffer | null = null;
   private pendingTextPrompts: string[] = [];
+  // Audio chunks buffered while a context-switch is in progress (prevents
+  // interruption audio from being lost when the old WS is torn down mid-switch).
+  private pendingAudioChunks: Buffer[] = [];
+  private isContextSwitching = false;
   private costTracker = new SessionCostTracker();
   private sessionCostSummarySent = false;
   private selectedAssistantId: AssistantId = DEFAULT_ASSISTANT_ID;
@@ -201,6 +205,19 @@ export class SessionHandler {
 
           if (aligned.byteLength === 0) break;
 
+          // Buffer audio during a context switch so that any speech the user
+          // uttered to interrupt the assistant isn't silently discarded when
+          // the old WS is torn down. The buffered PCM is replayed to the new
+          // WS after the swap (see flushPendingAudioChunks).
+          if (this.isContextSwitching) {
+            const MAX_BUFFERED_BYTES = 64 * 1024; // ~2 s at 16 kHz 16-bit mono
+            const bufferedTotal = this.pendingAudioChunks.reduce((s, b) => s + b.byteLength, 0);
+            if (bufferedTotal < MAX_BUFFERED_BYTES) {
+              this.pendingAudioChunks.push(aligned);
+            }
+            break;
+          }
+
           try {
             const int16 = new Int16Array(aligned.buffer, aligned.byteOffset, aligned.byteLength / 2);
             await this.professor.voice.send(int16);
@@ -219,7 +236,7 @@ export class SessionHandler {
         // Mirror typed input immediately in the UI transcript.
         this.sendJSON({ type: 'transcript', role: 'user', text });
 
-        if (this.isReconnecting || !this.professor) {
+        if (this.isReconnecting || this.isContextSwitching || !this.professor) {
           this.pendingTextPrompts.push(text);
           this.sendStatus('Messaggio testuale accodato: verra inviato appena la connessione e pronta.');
           break;
@@ -673,6 +690,7 @@ export class SessionHandler {
   private async connectToGeminiWithContext(payload: InjectionPayload): Promise<void> {
     if (this.isStarting) return;
     this.isStarting = true;
+    this.isContextSwitching = true;
 
     let createdProfessor: ProfessorAgent | null = null;
 
@@ -769,6 +787,11 @@ export class SessionHandler {
 
       this.reconnectAttempts = 0;
       this.isReconnecting = false;
+      this.isContextSwitching = false;
+
+      // Replay any audio/text that arrived while the old WS was being torn down
+      // (e.g. the user interrupted the assistant right at the switch boundary).
+      await this.flushPendingAudioChunks(voice);
       this.flushPendingTextPrompts(voice);
 
       // Tell ContextManager the switch succeeded — snapshot token count for delta threshold.
@@ -785,9 +808,13 @@ export class SessionHandler {
       if (createdProfessor) {
         await createdProfessor.destroy();
       }
+      // Discard buffered audio — the old WS is still alive so audio will
+      // resume normally from the next chunk.
+      this.pendingAudioChunks = [];
       // Fallback: keep the current connection alive — don't crash the session.
     } finally {
       this.isStarting = false;
+      this.isContextSwitching = false;
     }
   }
 
@@ -926,6 +953,22 @@ export class SessionHandler {
       const msg = err instanceof Error ? err.message : String(err);
       console.warn(`[${this.sessionId}] sendRealtimeText failed:`, msg);
       return false;
+    }
+  }
+
+  private async flushPendingAudioChunks(voice: any) {
+    if (this.pendingAudioChunks.length === 0) return;
+    const chunks = this.pendingAudioChunks.splice(0);
+    const combined = Buffer.concat(chunks);
+    if (combined.byteLength < 2) return;
+    // Ensure even byte length for Int16Array
+    const usable = combined.byteLength % 2 === 0 ? combined : combined.slice(0, combined.byteLength - 1);
+    try {
+      const int16 = new Int16Array(usable.buffer, usable.byteOffset, usable.byteLength / 2);
+      await voice.send(int16);
+      console.log(`[${this.sessionId}] Flushed ${usable.byteLength} buffered audio bytes to new WS after context switch.`);
+    } catch (err) {
+      console.warn(`[${this.sessionId}] flushPendingAudioChunks failed:`, err instanceof Error ? err.message : String(err));
     }
   }
 
@@ -1118,7 +1161,9 @@ export class SessionHandler {
     this.pendingMicByte = null;
     this.pendingTtsByte = null;
     this.pendingTextPrompts = [];
+    this.pendingAudioChunks = [];
     this.isReconnecting = false;
+    this.isContextSwitching = false;
     this.ragService = null;
 
     if (this.contextManager) {
