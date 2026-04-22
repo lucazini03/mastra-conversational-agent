@@ -1,167 +1,165 @@
-# MemorAIz — AI Oral Exam Assistant (H-Farm)
-
-> **For reviewers:** This document is intended to give a complete, honest picture of how the system works under the hood — from the browser microphone all the way to Google's Gemini Live API and back. Nothing is glossed over.
+# MemorAIz — Voice Agent
 
 ---
 
-## Table of Contents
+## Indice
 
-1. [What it is](#1-what-it-is)
-2. [High-level architecture](#2-high-level-architecture)
-3. [The Professor persona in depth](#3-the-professor-persona-in-depth)
-4. [Why and how we pre-summarise the document (RAG topic-seeding)](#4-why-and-how-we-pre-summarise-the-document-rag-topic-seeding)
-5. [Real-time RAG during conversation](#5-real-time-rag-during-conversation)
-6. [Voice Activity Detection (VAD) — why and how](#6-voice-activity-detection-vad--why-and-how)
-7. [WebSocket token cycling — why and how](#7-websocket-token-cycling--why-and-how)
-8. [Session resumption (unexpected disconnects)](#8-session-resumption-unexpected-disconnects)
-9. [Cost tracking](#9-cost-tracking)
-10. [Session logging](#10-session-logging)
-11. [Other assistant personas](#11-other-assistant-personas)
-12. [Running the project](#12-running-the-project)
-13. [Repository layout](#13-repository-layout)
-
----
-
-## 1. What it is
-
-MemorAIz is a **real-time voice AI** that simulates an oral university exam for H-Farm students. A student opens a browser, uploads a lecture transcript (or any study document), and is immediately put in front of a speaking, listening, questioning professor. The professor:
-
-- speaks with a natural Italian academic tone using Google's Gemini Live text-to-speech/speech-to-text API,
-- follows a structured syllabus derived from the uploaded document,
-- asks questions, gives one-line feedback, tracks mastery per subtopic,
-- awards a final grade when all topics have been covered.
-
-Beyond the professor, the same runtime hosts five other assistant personas (interview coach, study tutor, audio guide, immigration assistant, language tutor) all sharing the same infrastructure.
+1. [Cos’è](#1-cosè)
+2. [Architettura ad alto livello](#2-architettura-ad-alto-livello)
+3. [La personalità del Professore in dettaglio](#3-la-personalità-del-professore-in-dettaglio)
+4. [Perché e come pre-sintetizziamo il documento (topic-seeding RAG)](#4-perché-e-come-pre-sintetizziamo-il-documento-topic-seeding-rag)
+5. [RAG in tempo reale durante la conversazione](#5-rag-in-tempo-reale-durante-la-conversazione)
+6. [Voice Activity Detection (VAD) — perché e come](#6-voice-activity-detection-vad--perché-e-come)
+7. [Ciclo dei token via WebSocket — perché e come](#7-ciclo-dei-token-via-websocket--perché-e-come)
+8. [Ripresa della sessione (disconnessioni inattese)](#8-ripresa-della-sessione-disconnessioni-inattese)
+9. [Tracciamento dei costi](#9-tracciamento-dei-costi)
+10. [Logging delle sessioni](#10-logging-delle-sessioni)
+11. [Altre personalità assistant](#11-altre-personalità-assistant)
+12. [Avvio del progetto](#12-avvio-del-progetto)
+13. [Struttura del repository](#13-struttura-del-repository)
 
 ---
 
-## 2. High-level architecture
+## 1. Cos’è
 
-```
+Questo progetto contiene l'implementazione di una **voce AI real-time** che simula un esame orale universitario per studenti H-Farm (ma può essere adattato ad altri contesti, tramite il system context). Uno studente apre il browser, carica una trascrizione della lezione (o un qualunque documento di studio) e si trova subito davanti a un professore che parla, ascolta e interroga. Il professore:
+
+- parla con un tono accademico naturale in italiano usando la Gemini Live API di Google
+- segue un programma strutturato ricavato dal documento caricato,
+- fa domande, dà feedback in una riga, traccia la padronanza per sottotema,
+- assegna un voto finale quando tutti gli argomenti sono stati coperti.
+
+Oltre al professore, lo stesso runtime ospita altre cinque personalità assistant (interview coach, study tutor, audio guide, immigration assistant, language tutor), tutte basate sulla stessa infrastruttura.
+
+---
+
+## 2. Architettura ad alto livello
+
+```text
 Browser (public/)
-  │  Silero VAD (ONNX/WASM)
-  │  WebAudio PCM capture (16 kHz, 16-bit, mono)
-  │  WebAudio playback (24 kHz, 16-bit, mono)
-  │
-  │  WebSocket (JSON control frames + base64 PCM chunks)
-  │
-Node.js Server (src/server/index.ts)  <── Express HTTP (serves public/)
-  │
-  ├── SessionHandler (one instance per browser WS connection)
-  │     ├── DocumentService      – parse PDFs/TXT, generate topic summary via LLM
-  │     ├── BrowserRagService    – DuckDB vector store, semantic search
-  │     ├── ContextManager       – token monitoring, compaction, WS-switch scheduling
-  │     ├── SessionCostTracker   – token/cost accounting
-  │     └── SessionLogger        – per-session .log + .json files
-  │
-  └── createProfessorAgent()     – per-session GeminiLiveVoice + Mastra Agent
-        │
-        │  Bidirectional WebSocket (Google BidiGenerateContent)
-        │
-      Google Gemini Live API
-        ├── Speech-to-text (user audio → transcript)
-        ├── LLM reasoning + tool calls
-        └── Text-to-speech (model text → audio)
+   │  Silero VAD (ONNX/WASM)
+   │  Acquisizione WebAudio PCM (16 kHz, 16-bit, mono)
+   │  Riproduzione WebAudio (24 kHz, 16-bit, mono)
+   │
+   │  WebSocket (frame JSON di controllo + chunk PCM base64)
+   │
+Node.js Server (src/server/index.ts)  <── Express HTTP (serve public/)
+   │
+   ├── SessionHandler (una istanza per ogni connessione WS del browser)
+   │     ├── DocumentService      – parsing PDF/TXT, generazione sintesi topic via LLM
+   │     ├── BrowserRagService    – vector store DuckDB, ricerca semantica
+   │     ├── ContextManager       – monitoraggio token, compaction, scheduling switch WS
+   │     ├── SessionCostTracker   – accounting token/costi
+   │     └── SessionLogger        – file .log + .json per sessione
+   │
+   └── createProfessorAgent()     – GeminiLiveVoice + Mastra Agent per sessione
+            │
+            │  WebSocket bidirezionale (Google BidiGenerateContent)
+            │
+         Google Gemini Live API
+            ├── Speech-to-text (audio utente → trascrizione)
+            ├── LLM reasoning + tool calls
+            └── Text-to-speech (testo modello → audio)
 ```
 
-Every browser connection gets its own isolated `SessionHandler` instance. There is **no shared state between users**.
+Ogni connessione browser riceve una propria istanza isolata di `SessionHandler`. **Non esiste stato condiviso tra utenti.** Il server è stateless e può scalare orizzontalmente senza problemi. Tutto lo stato specifico della sessione (stato del professore, documenti caricati, log) è salvato su disco in modo persistente e isolato per sessione.
 
 ---
 
-## 3. The Professor persona in depth
+## 3. La personalità del Professore in dettaglio
 
-### Two modes
+### Due modalità
 
-| Mode | Triggered when | Behaviour |
-|------|----------------|-----------|
-| **RAG** | A summary/support document is uploaded | Syllabus extracted at start; `search_documents` used for every subtopic |
-| **Free Roam** | No document uploaded | Professor improvises based on the student's chosen subject; concepts discovered on-the-fly |
+| Modalità | Quando si attiva | Comportamento |
+|----------|------------------|---------------|
+| **RAG** | È stato caricato un documento di supporto/riassunto | Il syllabus viene estratto all’inizio; `search_documents` viene usato per ogni sottotema |
+| **Free Roam** | Nessun documento caricato | Il professore improvvisa sul tema scelto dallo studente; i concetti vengono scoperti al volo |
 
-### The exam flow (RAG mode)
+### Flusso dell’esame (modalità RAG)
 
-1. **Phase 1 – Opening.** The professor introduces itself as "l'assistente del professore di [subject] per il college H-Farm", deduces the subject from the syllabus, and asks the student's name.
-2. **Phase 2 – Topic selection.** Lists macro-topics still at mastery score 0. The student (or the professor) picks where to start.
-3. **Phase 3 – Exam loop.** For each subtopic:
-   - Calls `search_documents` with the subtopic name to retrieve grounded content from the RAG index.
-   - Formulates a question **only** from the retrieved text.
-   - Gives feedback: "Corretto" / "Quasi" / "Non proprio" + one-line correction if needed.
-   - Updates the subtopic's mastery score (0–3) in the compact state.
-4. **Phase 4 – Final grade.** When all subtopics are at mastery ≥ 2 (or the student asks for a grade), the professor gives a score with justification.
+1. **Fase 1 – Apertura.** Il professore si presenta come "l'assistente del professore di [materia] per il college H-Farm", deduce la materia dal syllabus e chiede il nome dello studente.
+2. **Fase 2 – Scelta degli argomenti.** Elenca i macro-argomenti ancora con mastery score 0. Lo studente (o il professore) sceglie da dove iniziare.
+3. **Fase 3 – Ciclo d’esame.** Per ogni sottotema:
+    - chiama `search_documents` con il nome del sottotema per recuperare contenuto grounded dal RAG index,
+    - formula una domanda **solo** a partire dal testo recuperato,
+    - dà feedback: "Corretto" / "Quasi" / "Non proprio" + una correzione in una riga se serve,
+    - aggiorna il mastery score del sottotema (0–3) nello stato compatto.
+4. **Fase 4 – Voto finale.** Quando tutti i sottotemi sono a mastery ≥ 2 (o lo studente chiede il voto), il professore assegna un punteggio con motivazione.
 
-### Mastery scoring
+### Scoring di mastery
 
-| Score | Meaning |
-|-------|---------|
-| 0 | Not yet discussed |
-| 1 | Major gaps — professor had to explain |
-| 2 | Sufficient — student answered with hints |
-| 3 | Strong — student answered correctly without help |
+| Score | Significato |
+|------|------------|
+| 0 | Non ancora discusso |
+| 1 | Lacune importanti — il professore ha dovuto spiegare |
+| 2 | Sufficiente — lo studente ha risposto con aiuti |
+| 3 | Forte — risposta corretta senza aiuto |
 
 ---
 
-## 4. Why and how we pre-summarise the document (RAG topic-seeding)
+## 4. Perché e come pre-sintetizziamo il documento (topic-seeding RAG)
 
-### The hallucination problem
+### Il problema delle allucinazioni
 
-Without pre-processing, the professor's only way to know what topics exist in the uploaded document would be to search for them at runtime. But that creates a chicken-and-egg problem: to search for a topic, you need to know what to search for.
+Senza pre-processing, l’unico modo per il professore di sapere quali argomenti esistono nel documento caricato sarebbe cercarli runtime. Ma questo crea un problema circolare: per cercare un topic, devi già sapere cosa cercare.
 
-A naive solution would be to call `search_documents("next topic to discuss")` or `search_documents("main subjects in the document")`. This fails in practice because:
+Una soluzione ingenua sarebbe chiamare `search_documents("next topic to discuss")` o `search_documents("main subjects in the document")`. In pratica fallisce perché:
 
-- The vector store does **cosine similarity** between the query embedding and chunk embeddings. Vague queries like "next topic" match poorly against dense academic text.
-- The professor would retrieve irrelevant chunks and hallucinate topics that do not exist in the document, or miss chapters that are present.
+- il vector store fa **cosine similarity** tra l’embedding della query e quelli dei chunk; query vaghe come "next topic" matchano male con testo accademico denso,
+- il professore recupererebbe chunk irrilevanti e allucinerebbe topic inesistenti oppure perderebbe capitoli presenti nel documento.
 
-### The solution: one LLM call at session start
+### La soluzione: una sola chiamata LLM all’inizio della sessione
 
-When the student uploads a document, **before** the Gemini Live WebSocket is even opened, `DocumentService.getOrGenerateSummary()` does the following:
+Quando lo studente carica un documento, **prima** che la WebSocket Gemini Live venga aperta, `DocumentService.getOrGenerateSummary()` fa questo:
 
+```text
+1. Parsing del file caricato (PDF o TXT) → testo normalizzato
+2. Calcolo dell’hash SHA-256 del testo combinato
+3. Controllo di logs/summaries/<hash>_summary.json su disco  (cache)
+    CACHE HIT  → carica il JSON istantaneamente, costo LLM zero
+    CACHE MISS → chiama gemini-3.1-flash-lite-preview con il testo completo
+                        prompt: "Estrai un indice dettagliato dei topic. Restituisci solo
+                                     gli argomenti esplicitamente presenti nel testo sorgente."
+                        output: { main_topics: [ { topic, subtopics: [...] } ] }
+                        salva su disco per future sessioni con lo stesso documento
 ```
-1. Parse the uploaded file (PDF or TXT) → normalised plaintext
-2. Compute SHA-256 hash of the combined text
-3. Check logs/summaries/<hash>_summary.json on disk  (cache)
-   CACHE HIT  → load JSON instantly, zero LLM cost
-   CACHE MISS → call gemini-3.1-flash-lite-preview with the full text
-                prompt: "Extract a detailed topic outline. Return only topics
-                         explicitly written in the source text."
-                output: { main_topics: [ { topic, subtopics: [...] } ] }
-                save to disk for future sessions with the same document
-```
 
-The model used is intentionally **small and cheap** (Gemini Flash Lite). It does not need to reason — it only needs to extract a structured list from text it can read in full.
+Il modello usato è volutamente **piccolo ed economico** (Gemini Flash Lite). Non deve ragionare: deve solo estrarre una lista strutturata da un testo che può leggere interamente. È molto veloce. Il risultato è un syllabus dettagliato che il professore può usare per guidare la conversazione in modo affidabile, senza allucinazioni.
 
-#### Context: how we get the document at H-Farm
+#### Contesto: come otteniamo il documento a H-Farm
 
-At H-Farm, every lecture already comes with an AI-generated transcript. The professor or course coordinator uploads that transcript (or any study PDF) through the browser UI. This document is prepared externally; the system's job is only to parse and index it.
+A H-Farm, la lezione viene già caricata dal docente come videolezione. Il sistema esegue automaticamente la trascrizione tramite **STT**. Inoltre, abbiamo già un riassunto della lezione, anche se non strutturato. L'idea è: prima, facciamo un ulteriore riassunto strutturato (topic-seeding) con un LLM, e poi usiamo quel riassunto per alimentare il professore. Il documento di supporto per il RAG è la trascrizione completa.
 
-#### Concrete example
+#### Esempio concreto
 
-Imagine a student uploads a lecture transcript about the Cold War. The text contains sections on the Marshall Plan, the Berlin Wall, NATO, and the Space Race.
+Immaginiamo che uno studente carichi la trascrizione di una lezione sulla Guerra Fredda. Il testo contiene sezioni sul Piano Marshall, il Muro di Berlino, la NATO e la Space Race.
 
-The LLM produces:
+L’LLM produce:
 
 ```json
 {
-  "main_topics": [
-    {
-      "topic": "The Marshall Plan",
-      "subtopics": ["Origins and US motives", "European reconstruction funds", "Soviet rejection"]
-    },
-    {
-      "topic": "The Berlin Wall",
-      "subtopics": ["Construction in 1961", "Life in divided Berlin", "Fall in 1989"]
-    },
-    {
-      "topic": "NATO formation",
-      "subtopics": ["Founding treaty 1949", "Article 5 collective defence"]
-    },
-    {
-      "topic": "The Space Race",
-      "subtopics": ["Sputnik launch", "Apollo programme", "Technological propaganda"]
-    }
-  ]
+   "main_topics": [
+      {
+         "topic": "The Marshall Plan",
+         "subtopics": ["Origins and US motives", "European reconstruction funds", "Soviet rejection"]
+      },
+      {
+         "topic": "The Berlin Wall",
+         "subtopics": ["Construction in 1961", "Life in divided Berlin", "Fall in 1989"]
+      },
+      {
+         "topic": "NATO formation",
+         "subtopics": ["Founding treaty 1949", "Article 5 collective defence"]
+      },
+      {
+         "topic": "The Space Race",
+         "subtopics": ["Sputnik launch", "Apollo programme", "Technological propaganda"]
+      }
+   ]
 }
 ```
 
-This JSON is then converted to a compact markdown checklist and appended to the professor's system prompt **before** the Gemini Live connection is opened:
+Questo JSON viene poi convertito in una checklist markdown compatta e aggiunto al system prompt del professore **prima** che la connessione Gemini Live venga aperta:
 
 ```markdown
 ## SESSION STATE (RAG Mode)
@@ -178,315 +176,318 @@ This JSON is then converted to a compact markdown checklist and appended to the 
 ...
 ```
 
-The professor now knows the full syllabus from the very first message. When it asks about "Construction in 1961" it calls `search_documents("Construction in 1961")` — a specific, grounded query that reliably returns the relevant passage from the vector index.
+Il professore conosce così il syllabus completo fin dal primo messaggio. Quando chiede "Construction in 1961" chiama `search_documents("Construction in 1961")`, una query specifica e grounded che recupera in modo affidabile il passaggio rilevante dall’indice vettoriale.
 
-**No hallucination. No vague searches. Zero extra latency for returning users (cache hit).**
+**Nessuna allucinazione. Nessuna ricerca vaga. Latenza extra zero per gli utenti già noti (cache hit).**
 
-### The two document upload fields
+### I due campi di upload dei documenti
 
-The browser UI exposes two distinct upload areas:
+La UI del browser espone due aree di upload distinte:
 
-| Field | Purpose |
-|-------|---------|
-| **Base document** (summary source) | Used **only** for the one-off LLM topic extraction. Typically the full lecture transcript. |
-| **Support documents** (RAG source) | Chunked, embedded, and stored in the DuckDB vector index. Queried at runtime by `search_documents`. |
+| Campo | Scopo |
+|------|-------|
+| **Documento base** (fonte del riassunto) | Usato **solo** per l’estrazione one-off dei topic tramite LLM. Tipicamente la trascrizione completa della lezione. |
+| **Documenti di supporto** (fonte RAG) | Chunked, embedded e salvati nell’indice vettoriale DuckDB. Interrogati runtime da `search_documents`. |
 
-If only the base document is uploaded, it is reused for both purposes. If only support documents are uploaded, the topic-extraction step is skipped.
-
----
-
-## 5. Real-time RAG during conversation
-
-The RAG pipeline (`src/server/ragService.ts`) runs alongside the Live session:
-
-1. **Index build** (once per session, async, starts in background while the WS connects):
-   - Each uploaded support document is parsed into plaintext.
-   - The text is chunked (default: 1200-char chunks, 200-char overlap).
-   - Each chunk is embedded using `gemini-embedding-001` (via Google AI SDK).
-   - Embeddings + metadata are upserted into a **DuckDB** vector store on disk (`rag.duckdb`).
-   - Each session uses its own index name (`pdf_knowledge_<sessionId>`) so multiple users do not collide.
-
-2. **`search_documents` tool** (registered on the Mastra Agent):
-   - Called by the professor whenever it needs to formulate a question for a specific subtopic.
-   - The query text is embedded, cosine similarity search runs, and the top-K chunks are returned.
-   - Chunks below a minimum similarity score are discarded (default: 0.1).
-   - The returned text is injected into the professor's context as grounding for the next question.
-
-The professor's prompt explicitly instructs it: *"Call `search_documents` as little as possible — only for new subtopics not already in your context."* This avoids redundant API calls once a passage has already been retrieved.
+Se viene caricato solo il documento base, esso viene riusato per entrambi gli scopi. Se vengono caricati solo documenti di supporto, lo step di estrazione dei topic viene saltato.
 
 ---
 
-## 6. Voice Activity Detection (VAD) — why and how
+## 5. RAG in tempo reale durante la conversazione
 
-### Why VAD?
+La pipeline RAG (`src/server/ragService.ts`) gira in parallelo alla sessione Live:
 
-Google Gemini Live bills **per second of audio streamed**, regardless of whether the user is speaking or silent. In a typical exam session with pauses between answers and the professor's own speaking turns, a naive approach (stream mic audio continuously) would bill for far more audio input tokens than necessary.
+1. **Costruzione dell’indice** (una volta per sessione, asincrona, in background mentre la WS si connette):
+    - ogni documento di supporto caricato viene parsato in testo normale,
+    - il testo viene chunked (default: chunk da 1200 caratteri, overlap di 200 caratteri),
+    - ogni chunk viene embeddato usando `gemini-embedding-001` (tramite Google AI SDK),
+    - embedding + metadata vengono upsertati in un vector store **DuckDB** su disco (`rag.duckdb`),
+    - ogni sessione usa il proprio nome indice (`pdf_knowledge_<sessionId>`) così più utenti non collidono.
 
-VAD solves this by sending microphone audio to the server **only when the user is actually speaking**.
+2. **Tool `search_documents`** (registrato sul Mastra Agent):
+    - viene chiamato dal professore quando deve formulare una domanda su uno specifico sottotema,
+    - il testo della query viene embeddato, parte la ricerca per cosine similarity e vengono restituiti i top-K chunk,
+    - i chunk sotto una soglia minima di similarità vengono scartati (default: 0.1),
+    - il testo restituito viene iniettato nel contesto del professore come grounding per la domanda successiva.
 
-### How it works (two-layer VAD)
-
-**Layer 1 — Silero VAD (browser, local, zero cost):**
-
-`@ricky0123/vad-web` runs the Silero VAD ONNX model inside a WebAssembly worker in the browser. It processes raw microphone frames continuously at negligible compute cost.
-
-- `positiveSpeechThreshold: 0.9` — only triggers on high-confidence speech (reduces false positives from keyboard noise, background chatter).
-- `negativeSpeechThreshold: 0.4` — deactivates after confidence drops below 0.4 (allows natural pauses inside a sentence without cutting off).
-- `minSpeechMs: 180` — ignores bursts shorter than 180 ms (coughs, clicks).
-- `preSpeechPadMs: 160` + server-side preroll buffer (280 ms) — ensures the first syllable is not clipped when speech detection triggers slightly late.
-
-When Silero fires `onSpeechRealStart`:
-1. All TTS playback is immediately stopped (the student interrupted the professor).
-2. `{ type: 'activity_start' }` is sent over the WebSocket and forwarded to Gemini as `realtimeInput.activityStart`.
-3. The preroll buffer (last 280 ms of audio frames captured while VAD was inactive) is flushed to the server.
-4. Subsequent microphone frames are streamed as `{ type: 'audio_chunk', data: <base64 PCM> }`.
-
-When Silero fires `onSpeechEnd`:
-1. `{ type: 'activity_end' }` is sent and forwarded to Gemini as `realtimeInput.activityEnd`.
-2. Microphone streaming stops.
-3. Preroll buffer is cleared.
-
-**Layer 2 — Gemini server-side VAD (disabled in our setup):**
-
-The Gemini Live API has its own built-in VAD. We **disable it** via a patched `setup` event (in `agentFactory.ts`), because:
-- Our Silero VAD is more responsive (runs locally, zero network latency).
-- The server-side VAD would double-bill audio input tokens since we are already doing smart gating on the client.
-- Disabling it gives us precise control over `activityStart`/`activityEnd` signals.
-
-### Result
-
-A typical 15-minute session generates roughly 3–4 minutes of actual student speech (the rest is professor speaking, pauses, thinking time). VAD reduces audio input tokens by approximately 70–80% compared to continuous streaming.
+Il prompt del professore istruisce esplicitamente: *"Chiama `search_documents` il meno possibile — solo per nuovi sottotemi non ancora presenti nel contesto."* Questo evita chiamate API ridondanti una volta che un passaggio è già stato recuperato.
 
 ---
 
-## 7. WebSocket token cycling — why and how
+## 6. Voice Activity Detection (VAD) — perché e come
 
-### The quadratic cost problem
+### Perché usare il VAD?
 
-The Gemini Live API maintains a native conversation context window. Every turn in the conversation costs tokens proportional to the **accumulated history**. Turn 1 costs 1x, turn 50 costs 50x. Over a long session the per-turn cost grows linearly, making the total session cost grow **quadratically**.
+La Gemini Live API di Google fattura **per secondo di audio trasmesso**, indipendentemente dal fatto che l’utente stia parlando o sia in silenzio. In una sessione tipica con pause tra le risposte e i turni di parola del professore, un approccio ingenuo (streaming continuo del microfono) farebbe pagare molto più audio input del necessario.
 
-For a 30-minute exam with many question/answer pairs, this becomes expensive. We need a way to reset the token counter periodically without losing conversational continuity.
+Il VAD risolve questo problema inviando audio al server **solo quando l’utente sta effettivamente parlando**.
 
-### The solution: Observational Memory + WebSocket cycling
+### Come funziona (VAD a due livelli)
 
-`ContextManager` (`src/services/contextManager/contextManager.ts`) implements this in several steps.
+**Livello 1 — Silero VAD (browser, locale, zero costo):**
 
-#### Step 1 — Token monitoring
+`@ricky0123/vad-web` esegue il modello Silero VAD ONNX dentro un worker WebAssembly nel browser. Elabora continuamente frame grezzi del microfono con costo computazionale minimo.
 
-After each Gemini message, the server parses the `usageMetadata` field from the raw WebSocket frame and accumulates `inputText + inputAudio` token counts. `ContextManager.checkTokenThreshold()` is called with the latest snapshot. When:
+- `positiveSpeechThreshold: 0.9` — attiva solo su speech ad alta confidenza (riduce falsi positivi da tastiera, rumore, voci di sottofondo),
+- `negativeSpeechThreshold: 0.4` — disattiva quando la confidenza scende sotto 0.4 (permette pause naturali dentro una frase senza interrompere),
+- `minSpeechMs: 180` — ignora burst più brevi di 180 ms (tosse, click),
+- `preSpeechPadMs: 160` + buffer preroll server-side (280 ms) — evita di tagliare la prima sillaba quando il rilevamento arriva leggermente in ritardo.
 
-    (currentTotalInput - lastSwitchTokenCount) >= MEMORY_EXTRACTION_TOKEN_THRESHOLD
+Quando Silero emette `onSpeechRealStart`:
+1. tutta la riproduzione TTS viene fermata immediatamente (lo studente ha interrotto il professore),
+2. `{ type: 'activity_start' }` viene inviato via WebSocket e inoltrato a Gemini come `realtimeInput.activityStart`,
+3. il preroll buffer (gli ultimi 280 ms di frame audio catturati mentre il VAD era inattivo) viene svuotato verso il server,
+4. i frame audio successivi vengono trasmessi come `{ type: 'audio_chunk', data: <base64 PCM> }`.
 
-the manager sets a flag: "extract on the next turnComplete". The threshold defaults to **50,000 tokens** (configurable via `MEMORY_EXTRACTION_TOKEN_THRESHOLD`).
+Quando Silero emette `onSpeechEnd`:
+1. `{ type: 'activity_end' }` viene inviato e inoltrato a Gemini come `realtimeInput.activityEnd`,
+2. lo streaming del microfono si ferma,
+3. il preroll buffer viene svuotato.
 
-#### Step 2 — Extraction (at the next natural silence)
+**Livello 2 — VAD server-side di Gemini (disabilitato nel nostro setup):**
 
-`turnComplete` is the signal Gemini sends when the model has finished its response — the silence between turns. This is the ideal moment to do background work:
-- The professor has stopped speaking.
-- No audio is being streamed.
-- A small delay here is invisible to the user.
+La Gemini Live API ha un VAD integrato. Noi lo **disabilitiamo** tramite un evento `setup` patchato (in `agentFactory.ts`), perché:
+- il nostro Silero VAD è più reattivo (gira localmente, senza latenza di rete),
+- il VAD server-side farebbe pagare due volte l’audio input, visto che stiamo già eseguendo un gating intelligente sul client,
+- disattivarlo ci dà controllo preciso sui segnali `activityStart`/`activityEnd`.
 
-At this point, `ContextManager` sends the **delta transcript** (only turns since the last extraction) to a small LLM (`gemini-3.1-flash-lite-preview`, with `gemini-2.5-flash-lite` as backup) with a structured extraction prompt:
+### Risultato
 
+Una sessione tipica di 15 minuti genera circa 3–4 minuti di parlato reale dello studente (il resto è il professore, pause e tempo di riflessione). Senza VAD, avremmo 15 minuti di audio input fatturato, con VAD paghiamo solo per i minuti effettivi di parlato dello studente, riducendo significativamente i costi.
+
+---
+
+## 7. Ciclo dei token via WebSocket — perché e come
+
+### Il problema dei costi quadratici
+
+La Gemini Live API mantiene un contesto conversazionale nativo. Ogni turno della conversazione costa token proporzionalmente alla **cronologia accumulata**. Il turno 1 costa 1x, il turno 50 costa molto più del turno 1. In una sessione lunga il costo per turno cresce linearmente, quindi il costo totale cresce in modo **quadratico**.
+
+Per un esame da 30 minuti con molti scambi domanda/risposta, questo diventa costoso. Serve un modo per resettare periodicamente il contatore dei token senza perdere continuità conversazionale.
+
+### La soluzione: Memoria Osservazionale + ciclazione del WebSocket
+
+`ContextManager` (`src/services/contextManager/contextManager.ts`) implementa questo processo in più passaggi.
+
+#### Passo 1 — Monitoraggio token
+
+Dopo ogni messaggio Gemini, il server legge il campo `usageMetadata` dal frame WebSocket raw e accumula i token `inputText + inputAudio`. `ContextManager.checkTokenThreshold()` viene chiamato con lo snapshot più recente. Quando:
+
+```text
+(currentTotalInput - lastSwitchTokenCount) >= MEMORY_EXTRACTION_TOKEN_THRESHOLD
 ```
-CURRENT STATE: <existing JSON state>
-NEW TRANSCRIPT DELTA:
+
+il manager imposta un flag: "estrai al prossimo `turnComplete`". La soglia di default è **50.000 token** (configurabile via `MEMORY_EXTRACTION_TOKEN_THRESHOLD`).
+
+#### Passo 2 — Estrazione (alla successiva silenzio naturale)
+
+`turnComplete` è il segnale che Gemini invia quando il modello ha finito la risposta — la pausa tra i turni. È il momento ideale per fare lavoro in background:
+- il professore ha smesso di parlare,
+- nessun audio viene trasmesso,
+- un piccolo delay qui è invisibile all’utente.
+
+A quel punto, `ContextManager` invia il **delta transcript** (solo i turni successivi all’ultima estrazione) a un piccolo LLM (`gemini-3.1-flash-lite-preview`, con `gemini-2.5-flash-lite` come fallback) con un prompt strutturato di estrazione:
+
+```text
+STATO ATTUALE: <JSON stato esistente>
+NUOVO DELTA TRASCRIZIONE:
 [model]: "Parliamo della costruzione del Muro di Berlino nel 1961..."
-[user]: "Il muro e stato costruito per impedire la fuga dei cittadini della Germania Est"
+[user]: "Il muro è stato costruito per impedire la fuga dei cittadini della Germania Est"
 [model]: "Esatto! E cosa sai delle reazioni occidentali?"
 
-RULE: Update mastery_score for each subtopic discussed.
-      Never add or remove items from topics_to_cover.
-      Update student_info, current_topic, behavioral_directives.
+REGOLE: Aggiorna mastery_score per ogni sottotema discusso.
+            Non aggiungere né rimuovere elementi da topics_to_cover.
+            Aggiorna student_info, current_topic, behavioral_directives.
 ```
 
-The LLM produces an updated `professorStateSchema` JSON:
+L’LLM produce uno `professorStateSchema` JSON aggiornato:
 
 ```json
 {
-  "session_mode": "RAG",
-  "student_info": { "name": "Luca", "education_level": "university" },
-  "current_topic": "The Berlin Wall",
-  "topics_to_cover": [
-    {
-      "main_topic": "The Berlin Wall",
-      "subtopics": [
-        { "name": "Construction in 1961", "mastery_score": 3 },
-        { "name": "Life in divided Berlin", "mastery_score": 0 },
-        { "name": "Fall in 1989", "mastery_score": 0 }
-      ]
-    }
-  ],
-  "covered_concepts": [],
-  "behavioral_directives": ["Student prefers concise questions"],
-  "overall_evaluation": "Strong knowledge of factual events, limited analysis so far."
+   "session_mode": "RAG",
+   "student_info": { "name": "Luca", "education_level": "university" },
+   "current_topic": "The Berlin Wall",
+   "topics_to_cover": [
+      {
+         "main_topic": "The Berlin Wall",
+         "subtopics": [
+            { "name": "Construction in 1961", "mastery_score": 3 },
+            { "name": "Life in divided Berlin", "mastery_score": 0 },
+            { "name": "Fall in 1989", "mastery_score": 0 }
+         ]
+      }
+   ],
+   "covered_concepts": [],
+   "behavioral_directives": ["Lo studente preferisce domande concise"],
+   "overall_evaluation": "Solida conoscenza dei fatti, analisi ancora limitata."
 }
 ```
 
-This JSON is approximately **200 tokens** versus the original transcript delta that might have been **5,000 tokens**.
+Questo JSON vale circa **200 token** contro un delta trascrizione che può arrivare a **5.000 token**.
 
-#### Step 3 — WebSocket switch (at the NEXT silence)
+#### Passo 3 — Switch del WebSocket (alla *successiva* pausa)
 
-After extraction completes, the manager waits for the **next** `turnComplete`. This two-turn gap ensures:
-1. The professor finishes its current sentence before the swap.
-2. Any transcript arriving between extraction start and the switch is captured in a "volatile buffer".
+Quando l’estrazione è completata, il manager aspetta il **turnComplete** successivo. Questo gap di due turni garantisce che:
+1. il professore finisca la frase corrente prima dello switch,
+2. qualsiasi trascrizione arrivata tra l’inizio dell’estrazione e lo switch venga catturata in un “volatile buffer”.
 
-At that `turnComplete`, `switchReady` is emitted. The `SessionHandler` then:
+A quel `turnComplete`, viene emesso `switchReady`. `SessionHandler` allora:
 
-1. Creates a **brand-new** `GeminiLiveVoice` instance (new WebSocket to Google).
-2. Injects a fully-assembled system prompt into the new connection's `setup` event:
-   - Base professor prompt
-   - SESSION CONTINUATION warning (do NOT re-introduce yourself)
-   - Compact state as markdown checklist with updated mastery scores
-   - Volatile buffer turns (exchanges that happened during extraction — "DO NOT REPEAT")
-   - YOUR LAST MESSAGE anchor (the last thing the professor said — anti-repetition guard)
-3. Connects the new WebSocket.
-4. Destroys the old WebSocket (the old conversation history is **intentionally discarded**).
-5. Resets the token counter baseline to the current count.
+1. crea una **nuova** istanza `GeminiLiveVoice` (nuova WebSocket verso Google),
+2. inietta un system prompt completo nella `setup` event della nuova connessione:
+    - prompt base del professore,
+    - warning SESSION CONTINUATION (non re-introdurti),
+    - stato compatto come checklist markdown con i mastery score aggiornati,
+    - turni del volatile buffer (scambi avvenuti durante l’estrazione — “DO NOT REPEAT”),
+    - ancora `YOUR LAST MESSAGE` (anti-repetition guard),
+3. connette la nuova WebSocket,
+4. distrugge la vecchia WebSocket (la vecchia cronologia viene **intenzionalmente scartata**),
+5. resetta il baseline del contatore token al valore corrente.
 
-The student experiences at most a 1–2 second "Ottimizzazione della memoria in corso..." status message. The professor continues exactly where it left off, asking about the next untested subtopic.
+Lo studente vede al massimo un messaggio di stato di 1–2 secondi tipo: "Ottimizzazione della memoria in corso...". Il professore continua esattamente da dove aveva interrotto, chiedendo il prossimo sottotema non ancora verificato.
 
-**Important:** The new WebSocket does **not** use a Google session resumption handle. That would tell Google to restore the full prior context — negating all cost savings and creating a "double memory" conflict (native history vs injected compact state). Resumption handles are only used for unexpected disconnects (see next section).
+**Importante:** la nuova WebSocket **non** usa un resumption handle di Google. Questo significherebbe ripristinare il contesto completo precedente — annullando il risparmio sui costi e creando un conflitto di “doppia memoria” (cronologia nativa vs stato compatto iniettato). I resumption handle si usano solo per disconnessioni inattese (vedi sezione successiva).
 
-#### Visual summary of the flow
+#### Riepilogo visivo del flusso
 
+```text
+Turni 1–10:  Conversazione normale (il conteggio token cresce)
+                   ContextManager accumula la trascrizione
+
+Turno 10:    Delta token >= 15.000 → flag extraction
+                   Prossimo turnComplete → avvio estrazione LLM (async, ~1–2 s)
+                   Volatile buffer inizia a catturare i nuovi turni
+
+Estrazione   gemini-flash-lite legge il delta → produce stato JSON compatto
+in corso:    (invisibile all’utente, il professore può ancora parlare)
+
+Turno 11:    Estrazione completata → flag switchReady
+Turno 12:    turnComplete (il professore finisce di parlare) → emit switchReady
+                   Nuova WS GeminiLive con stato compatto iniettato
+                   Vecchia WS distrutta
+                   Contatore token resettato a 0 (relativo al nuovo punto di switch)
+
+Turno 13+:   La conversazione continua senza soluzione di continuità, token bassi
 ```
-Turn 1–40:   Normal conversation (token count grows)
-             ContextManager accumulates transcript
-
-Turn 40:     Token delta >= 50,000 → flag extraction
-             Next turnComplete → kick off extraction LLM call (async, ~1–2 s)
-             Volatile buffer starts capturing new turns
-
-Extraction   gemini-flash-lite reads delta → produces compact JSON state
-running:     (invisible to user, professor may still be speaking)
-
-Turn 42:     Extraction done → flag switchReady
-Turn 43:     turnComplete (professor finished speaking) → emit switchReady
-             New GeminiLive WS opens with compact state injected
-             Old WS destroyed
-             Token counter reset to 0 (relative to new switch point)
-
-Turn 44+:    Conversation continues seamlessly, token counter low again
-```
 
 ---
 
-## 8. Session resumption (unexpected disconnects)
+## 8. Ripresa della sessione (disconnessioni inattese)
 
-Google's Gemini Live API terminates WebSocket connections after approximately 10 minutes of wall-clock time. Network interruptions can also drop the connection. This is handled separately from context cycling:
+La Gemini Live API di Google chiude le connessioni WebSocket dopo circa 10 minuti di wall-clock time. Anche interruzioni di rete possono far cadere la connessione. Questo viene gestito separatamente dal context cycling:
 
-1. A raw WebSocket spy on the Gemini connection captures `sessionResumptionUpdate` messages as they arrive. The latest resumption handle is stored in `SessionHandler.resumptionHandle`.
-2. When an unexpected close/error is detected, `scheduleReconnect()` waits 1.5 s and calls `connectToGemini(isReconnect: true)`.
-3. The new connection injects the resumption handle into the `setup` event so Google restores the native conversation state.
-4. The student sees "Connessione ripristinata." and the professor continues without interruption.
-5. Maximum 5 attempts; after that, an error is shown and the user must reload.
+1. uno spy raw sulla connessione Gemini cattura i messaggi `sessionResumptionUpdate` man mano che arrivano; l’ultimo resumption handle viene salvato in `SessionHandler.resumptionHandle`,
+2. quando viene rilevata una close/error inattesa, `scheduleReconnect()` aspetta 1,5 s e chiama `connectToGemini(isReconnect: true)`,
+3. la nuova connessione inserisce il resumption handle nell’evento `setup` così Google ripristina lo stato nativo della conversazione,
+4. lo studente vede "Connessione ripristinata." e il professore continua senza interruzioni,
+5. massimo 5 tentativi; oltre questo viene mostrato un errore e l’utente deve ricaricare.
 
-This is **different** from the context-switch path: here we want full conversation restoration, not cost reduction.
-
----
-
-## 9. Cost tracking
-
-`SessionCostTracker` accumulates token usage from every `usageMetadata` payload received from Gemini:
-
-| Token type | Source | Price env var |
-|------------|--------|---------------|
-| `inputText` | System prompt + tool results text | `GOOGLE_PRICE_TEXT_INPUT_PER_1M` |
-| `inputAudio` | Student microphone PCM | `GOOGLE_PRICE_AUDIO_INPUT_PER_1M` |
-| `outputText` | Professor transcript | `GOOGLE_PRICE_TEXT_OUTPUT_PER_1M` |
-| `outputAudio` | Professor speech PCM | `GOOGLE_PRICE_AUDIO_OUTPUT_PER_1M` |
-| Summary LLM | Document pre-summary call | `GOOGLE_PRICE_TEXT_INPUT_PER_1M_LITE` |
-| Extraction LLM | Context compaction calls | `GOOGLE_PRICE_TEXT_INPUT_PER_1M_LITE` |
-
-A full cost breakdown (total USD, per-modality, per-operation) is appended to the session log at teardown. If price env vars are not set, costs are shown as `null`; token counts are always tracked regardless.
+Questo è **diverso** dal percorso di context-switch: qui vogliamo il ripristino completo della conversazione, non il risparmio sui costi.
 
 ---
 
-## 10. Session logging
+## 9. Tracciamento dei costi
 
-Every session writes two files to `logs/sessions/`:
+`SessionCostTracker` accumula l’uso dei token da ogni payload `usageMetadata` ricevuto da Gemini:
 
-- `YYYY-MM-DD_HH-MM-SS_<id>.log` — human-readable report with transcript, RAG calls, token deltas per episode, and cost summary.
-- `YYYY-MM-DD_HH-MM-SS_<id>.json` — machine-readable equivalent for programmatic analysis.
+| Tipo di token | Origine | Variabile prezzo |
+|--------------|---------|------------------|
+| `inputText` | System prompt + testo tool result | `GOOGLE_PRICE_TEXT_INPUT_PER_1M` |
+| `inputAudio` | PCM del microfono dello studente | `GOOGLE_PRICE_AUDIO_INPUT_PER_1M` |
+| `outputText` | Trascrizione del professore | `GOOGLE_PRICE_TEXT_OUTPUT_PER_1M` |
+| `outputAudio` | Audio parlato del professore | `GOOGLE_PRICE_AUDIO_OUTPUT_PER_1M` |
+| Summary LLM | Chiamata di pre-sintesi del documento | `GOOGLE_PRICE_TEXT_INPUT_PER_1M_LITE` |
+| Extraction LLM | Chiamate di compaction del contesto | `GOOGLE_PRICE_TEXT_INPUT_PER_1M_LITE` |
 
-A session is divided into **episodes** — one per WebSocket connection (initial, reconnect, or context switch). Each episode records its own transcript slice, RAG calls, token delta, and the compact JSON state generated just before the episode ended.
-
----
-
-## 11. Other assistant personas
-
-| ID | Name | Notes |
-|----|------|-------|
-| `professor` | Il Professore | Primary persona; RAG or Free Roam depending on uploaded docs |
-| `interview_coach` | HR Interviewer | Simulates a job interview; uses RAG to extract company/role from uploaded job description |
-| `study_tutor` | Study Tutor | Explains concepts; tracks understood/struggling concepts |
-| `audioguide` | Audio Guide | Museum tour guide; uses RAG on exhibit descriptions |
-| `immigration_assistant` | Immigration Assistant | Simple-language practical advice; A1/A2 vocabulary |
-| `language_tutor` | Language Tutor | Conversation practice; integrates corrections into the flow |
-
-All personas share the same WebSocket cycling, RAG, and session logging infrastructure. Each has its own compact state schema in `src/services/contextManager/schemas.ts`.
+Un breakdown completo dei costi (USD totali, per modalità, per operazione) viene aggiunto al log della sessione alla chiusura. Se le variabili di prezzo non sono impostate, i costi vengono mostrati come `null`; i conteggi token vengono comunque sempre tracciati.
 
 ---
 
-## 12. Running the project
+## 10. Logging delle sessioni
 
-### Prerequisites
+Ogni sessione scrive due file in `logs/sessions/`:
+
+- `YYYY-MM-DD_HH-MM-SS_<id>.log` — report leggibile con transcript, chiamate RAG, delta token per episodio e riepilogo costi.
+- `YYYY-MM-DD_HH-MM-SS_<id>.json` — equivalente machine-readable per analisi programmatica.
+
+Una sessione è divisa in **episodi** — uno per ogni connessione WebSocket (iniziale, reconnect o context switch). Ogni episodio registra il proprio slice di transcript, le chiamate RAG, il delta token e lo stato JSON compatto generato prima della fine dell’episodio.
+
+---
+
+## 11. Altre personalità assistant
+
+| ID | Nome | Note |
+|----|------|------|
+| `professor` | Il Professore | Persona principale; RAG o Free Roam a seconda dei documenti caricati |
+| `interview_coach` | HR Interviewer | Simula un colloquio di lavoro; usa RAG per estrarre azienda/ruolo dalla job description caricata |
+| `study_tutor` | Study Tutor | Spiega concetti; traccia concetti compresi/in difficoltà |
+| `audioguide` | Audio Guide | Guida di museo; usa RAG sulle descrizioni delle opere |
+| `immigration_assistant` | Immigration Assistant | Consigli pratici in linguaggio semplice; vocabolario A1/A2 |
+| `language_tutor` | Language Tutor | Conversazione guidata; integra le correzioni nel flusso |
+
+Tutte le personalità condividono la stessa infrastruttura di WebSocket cycling, RAG e session logging. Ognuna ha il proprio schema di stato compatto in `src/services/contextManager/schemas.ts`.
+
+---
+
+## 12. Avvio del progetto
+
+### Prerequisiti
 
 - Node.js >= 22.13.0
-- A Google AI Studio or Google Cloud API key with access to Gemini Live and embedding models.
+- Una chiave Google AI Studio o Google Cloud con accesso a Gemini Live e ai modelli di embedding.
 
 ### Setup
 
 ```bash
 cp .env.example .env
-# Fill in at minimum: GEMINI_LIVE_API_KEY, GEMINI_LLM_API_KEY, GEMINI_EMBEDDING_API_KEY
+# Compilare almeno: GEMINI_LIVE_API_KEY, GEMINI_LLM_API_KEY, GEMINI_EMBEDDING_API_KEY
 npm install
 npm run dev
-# Open http://localhost:3000
+# Aprire http://localhost:3000
 ```
 
-### Available scripts
+### Script disponibili
 
-| Script | What it does |
-|--------|-------------|
-| `npm run dev` | Start the server with live reload via `tsx` |
-| `npm run build` | Compile TypeScript to `dist/` |
-| `npm run start` | Run the compiled output |
-| `npm run mastra:dev` | Start Mastra Studio at `localhost:4111` (optional, for agent inspection) |
+| Script | Cosa fa |
+|--------|---------|
+| `npm run dev` | Avvia il server con live reload via `tsx` |
+| `npm run build` | Compila TypeScript in `dist/` |
+| `npm run start` | Avvia l’output compilato |
+| `npm run mastra:dev` | Avvia Mastra Studio su `localhost:4111` (opzionale, per ispezionare gli agent) |
 
 ---
 
-## 13. Repository layout
+## 13. Struttura del repository
 
-```
+```text
 src/
-  agent/
-    agentFactory.ts          - Creates a GeminiLiveVoice + Mastra Agent per session
-  client/
-    cli.ts                   - Optional CLI test client
-  config/
-    professorConfig.ts       - All system prompts + VOICE_CONFIG
-  server/
-    index.ts                 - Express HTTP + WebSocket server entry point
-    sessionHandler.ts        - Core session lifecycle, audio routing, reconnect logic
-    documentService.ts       - PDF parsing + LLM topic-summary generation + disk cache
-    documentFileUtils.ts     - PDF/TXT/MD file parser (pdf-parse + fs)
-    documentConfigStore.ts   - Temporary upload config registry (cleared on consume)
-    ragService.ts            - DuckDB vector store + embedding + semantic search
-    sessionCostTracker.ts    - Token/cost accounting per session
-    sessionLogger.ts         - Writes logs/sessions/*.log and *.json
-    usageTracker.ts          - Appends aggregated usage to a master log file
-  services/
-    contextManager/
-      contextManager.ts      - Token threshold monitoring + extraction + WS-switch scheduling
-      schemas.ts             - Zod schemas for compact state per assistant persona
-      index.ts               - Re-exports
+   agent/
+      agentFactory.ts          - Crea una GeminiLiveVoice + Mastra Agent per sessione
+   client/
+      cli.ts                   - Client CLI opzionale per test
+   config/
+      professorConfig.ts       - Tutti i system prompt + VOICE_CONFIG
+   server/
+      index.ts                 - Entrypoint server HTTP Express + WebSocket
+      sessionHandler.ts        - Lifecycle della sessione, routing audio, logica reconnect
+      documentService.ts       - Parsing PDF + generazione LLM del topic summary + cache su disco
+      documentFileUtils.ts     - Parser PDF/TXT/MD (pdf-parse + fs)
+      documentConfigStore.ts   - Registry temporaneo della configurazione upload (consumata alla lettura)
+      ragService.ts            - Vector store DuckDB + embedding + semantic search
+      sessionCostTracker.ts    - Accounting token/costi per sessione
+      sessionLogger.ts         - Scrive logs/sessions/*.log e *.json
+      usageTracker.ts          - Appende l’uso aggregato a un file log master
+   services/
+      contextManager/
+         contextManager.ts      - Monitoraggio soglia token + estrazione + scheduling switch WS
+         schemas.ts             - Schema Zod per lo stato compatto di ogni persona
+         index.ts               - Re-export
 
-public/                      - Static browser frontend (HTML/CSS/JS, served by Express)
+public/                      - Frontend statico browser (HTML/CSS/JS, servito da Express)
 logs/
-  sessions/                  - Per-session transcript + cost logs (gitignored)
-  summaries/                 - Cached document topic summaries keyed by SHA-256 (gitignored)
-  uploads/                   - Temporary uploaded files (gitignored)
-rag-docs/                    - (Optional) pre-placed RAG documents
+   sessions/                  - Transcript + log costo per sessione (gitignored)
+   summaries/                 - Summary documenti cache-ati per SHA-256 (gitignored)
+   uploads/                   - File upload temporanei (gitignored)
+rag-docs/                    - (Opzionale) documenti RAG pre-posizionati
 ```
+
