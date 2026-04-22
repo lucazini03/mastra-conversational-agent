@@ -114,19 +114,14 @@
           <div class="panel">
             <div class="panel-header">
               <div class="panel-header-dot" style="background:#f59e0b;box-shadow:0 0 6px #f59e0b;"></div>
-              Document Sources
+              Context Document
             </div>
             <div class="doc-config">
-              <label class="doc-field" for="summaryDocInput">
-                <span class="doc-label">Summary document (single file)</span>
-                <input class="doc-input" id="summaryDocInput" type="file" accept=".pdf,.txt,.md,.markdown,.text" />
-                <span class="doc-hint">Used to generate initial summary/topic map for the session.</span>
-              </label>
-
-              <label class="doc-field" for="ragDocInput">
-                <span class="doc-label">RAG document(s) (one or more files)</span>
-                <input class="doc-input" id="ragDocInput" type="file" accept=".pdf,.txt,.md,.markdown,.text" multiple />
-                <span class="doc-hint">Used by search_documents tool during conversation. If empty, summary file is reused for RAG.</span>
+              <label class="doc-field" for="contextDocInput">
+                <span class="doc-label">Context document (single file)</span>
+                <input class="doc-input" id="contextDocInput" type="file" accept=".pdf,.txt,.md,.markdown,.text" />
+                <span class="doc-hint">The full text is injected as persistent system context on every WebSocket setup/switch.</span>
+                <span class="doc-hint" id="contextDocName">Nessun file selezionato</span>
               </label>
             </div>
           </div>
@@ -167,14 +162,6 @@
               </div>
             </div>
 
-          </div>
-
-          <!-- Composer -->
-          <div class="panel">
-            <div class="composer-panel">
-              <input id="chatInput" type="text" placeholder="Type a message..." disabled />
-              <button id="sendBtn" disabled>Send</button>
-            </div>
           </div>
         </div>
 

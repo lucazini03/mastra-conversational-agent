@@ -5,6 +5,7 @@ export type UploadedDocumentConfig = {
   id: string;
   createdAtMs: number;
   uploadDir: string;
+  contextFiles: string[];
   summaryFiles: string[];
   ragFiles: string[];
 };
@@ -27,6 +28,7 @@ export class DocumentConfigStore {
       id,
       createdAtMs: Date.now(),
       uploadDir: payload.uploadDir,
+      contextFiles: payload.contextFiles,
       summaryFiles: payload.summaryFiles,
       ragFiles: payload.ragFiles,
     };

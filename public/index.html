@@ -77,33 +77,21 @@
         </div>
 
         <p class="status" id="status">Pronto</p>
-        <p class="hint" id="sessionHint">Carica i tuoi documenti usando le zone qui sopra, poi premi <strong>Avvia Sessione</strong> per iniziare l'esame orale.</p>
+        <p class="hint" id="sessionHint">Carica il documento di contesto, poi premi <strong>Avvia Sessione</strong> per iniziare l'esame orale.</p>
 
         <div class="doc-grid">
-          <label class="doc-field" for="summaryDocInput">
-            <span>Documento base</span>
-            <p class="doc-field-desc">PDF, TXT o Markdown. Usato per generare la mappa degli argomenti iniziale della sessione.</p>
+          <label class="doc-field" for="contextDocInput">
+            <span>Documento di contesto</span>
+            <p class="doc-field-desc">PDF, TXT o Markdown. Il contenuto completo viene iniettato nel contesto persistente dell'assistente per tutta la sessione.</p>
             <div class="doc-field-btn">&#8593;&nbsp; Scegli file</div>
-            <p class="doc-field-filename" id="summaryDocName">Nessun file selezionato</p>
-            <input id="summaryDocInput" type="file" accept=".pdf,.txt,.md,.markdown,.text" />
-          </label>
-          <label class="doc-field" for="ragDocInput">
-            <span>Documenti di supporto</span>
-            <p class="doc-field-desc">Uno o più file. Consultati in tempo reale durante la conversazione tramite ricerca semantica.</p>
-            <div class="doc-field-btn">&#8593;&nbsp; Scegli file/i</div>
-            <p class="doc-field-filename" id="ragDocName">Nessun file selezionato</p>
-            <input id="ragDocInput" type="file" accept=".pdf,.txt,.md,.markdown,.text" multiple />
+            <p class="doc-field-filename" id="contextDocName">Nessun file selezionato</p>
+            <input id="contextDocInput" type="file" accept=".pdf,.txt,.md,.markdown,.text" />
           </label>
         </div>
 
         <div class="actions">
           <button id="startBtn" class="btn btn-primary">Avvia Sessione</button>
           <button id="stopBtn" class="btn btn-danger" disabled>Termina</button>
-        </div>
-
-        <div class="composer">
-          <input id="chatInput" type="text" placeholder="Messaggio testuale (facoltativo)..." disabled />
-          <button id="sendBtn" class="btn btn-ghost" disabled>Invia</button>
         </div>
       </section>
     </main>

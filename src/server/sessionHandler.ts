@@ -22,7 +22,6 @@ import {
   DEFAULT_ASSISTANT_ID,
   getAssistantInstructions,
   isAssistantId,
-  PROFESSOR_RAG_PROMPT,
   PROFESSOR_FREE_ROAM_PROMPT,
   type AssistantId,
 } from '../config/professorConfig.js';
@@ -48,6 +47,11 @@ const RECONNECT_DELAY_MS = 1500;
 // reporting an error to the browser. Prevents infinite loops on hard failures.
 const MAX_RECONNECT_ATTEMPTS = 5;
 
+// Demo branch mode: always bypass RAG retrieval and inject the uploaded file
+// as persistent system context for every Gemini WebSocket setup/switch.
+const FORCE_FULL_FILE_CONTEXT_MODE =
+  (process.env.FORCE_FULL_FILE_CONTEXT_MODE ?? 'true').toLowerCase() !== 'false';
+
 // Resumption tokens are valid for 2 hours after the last session termination
 // (per Google docs), but we never need to hold them longer than the lifetime
 // of this SessionHandler, so no expiry logic is required here.
@@ -71,8 +75,10 @@ export class SessionHandler {
   private costTracker = new SessionCostTracker();
   private sessionCostSummarySent = false;
   private selectedAssistantId: AssistantId = DEFAULT_ASSISTANT_ID;
+  private selectedContextFiles: string[] = [];
   private selectedSummaryFiles: string[] = [];
   private selectedRagFiles: string[] = [];
+  private persistentFileContextBlock: string | null = null;
   private uploadedDocumentDir: string | null = null;
   private ragService: BrowserRagService | null = null;
   private readonly deps: SessionHandlerDeps;
@@ -290,36 +296,80 @@ export class SessionHandler {
       return;
     }
 
+    const uploadedContextFiles = uploadConfig?.contextFiles ?? [];
     const summaryFiles = uploadConfig?.summaryFiles ?? [];
     const explicitRagFiles = uploadConfig?.ragFiles ?? [];
     const effectiveRagFiles = explicitRagFiles.length > 0 ? explicitRagFiles : [...summaryFiles];
 
     this.uploadedDocumentDir = uploadConfig?.uploadDir ?? null;
+    this.selectedContextFiles =
+      uploadedContextFiles.length > 0
+        ? [...uploadedContextFiles]
+        : [...new Set([...summaryFiles, ...effectiveRagFiles])];
     this.selectedSummaryFiles = summaryFiles;
     this.selectedRagFiles = effectiveRagFiles;
-    this.ragService =
-      this.selectedRagFiles.length > 0
-        ? new BrowserRagService({
-            documentPaths: this.selectedRagFiles,
-            indexSuffix: this.sessionId,
-          })
-        : null;
+    this.persistentFileContextBlock = null;
+
+    if (!FORCE_FULL_FILE_CONTEXT_MODE && this.selectedRagFiles.length > 0) {
+      this.ragService = new BrowserRagService({
+        documentPaths: this.selectedRagFiles,
+        indexSuffix: this.sessionId,
+      });
+    } else {
+      this.ragService = null;
+    }
 
     this.intentionalClose = false;
     this.reconnectAttempts = 0;
     this.costTracker.reset();
     this.sessionCostSummarySent = false;
 
+    if (FORCE_FULL_FILE_CONTEXT_MODE && this.selectedContextFiles.length === 0) {
+      this.sendJSON({
+        type: 'error',
+        message: 'Carica un documento di contesto prima di avviare la sessione.',
+      });
+      return;
+    }
+
+    if (this.selectedContextFiles.length > 0) {
+      try {
+        const docs = await documentService.getDocumentsHashAndText(this.selectedContextFiles);
+        if (docs.text.trim().length > 0) {
+          this.persistentFileContextBlock = this.buildPersistentFileContextBlock(
+            docs.hash,
+            docs.files,
+          );
+        } else if (FORCE_FULL_FILE_CONTEXT_MODE) {
+          this.sendJSON({
+            type: 'error',
+            message: 'Il file caricato non contiene testo utilizzabile per il contesto persistente.',
+          });
+          return;
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (FORCE_FULL_FILE_CONTEXT_MODE) {
+          this.sendJSON({
+            type: 'error',
+            message: `Impossibile leggere il file di contesto: ${message}`,
+          });
+          return;
+        }
+        console.warn(`[${this.sessionId}] Failed to load persistent file context: ${message}`);
+      }
+    }
+
     // ── Determine session mode (professor-only: RAG vs FREE_ROAM) ──────────
     const hasDocuments = this.selectedSummaryFiles.length > 0 || this.selectedRagFiles.length > 0;
     const sessionMode: SessionMode | undefined =
       this.selectedAssistantId === 'professor'
-        ? (hasDocuments ? 'RAG' : 'FREE_ROAM')
+        ? (FORCE_FULL_FILE_CONTEXT_MODE ? 'FREE_ROAM' : hasDocuments ? 'RAG' : 'FREE_ROAM')
         : undefined;
 
     if (sessionMode) {
       console.log(
-        `[${this.sessionId}] Professor session mode: ${sessionMode} (documents: ${hasDocuments ? 'yes' : 'none'})`,
+        `[${this.sessionId}] Professor session mode: ${sessionMode} (context files: ${this.selectedContextFiles.length}, rag docs: ${hasDocuments ? 'yes' : 'none'})`,
       );
     }
 
@@ -327,9 +377,28 @@ export class SessionHandler {
     let instructions: string;
     let initialState: AnyAssistantState | null = null;
 
-    if (this.selectedAssistantId === 'professor' && sessionMode === 'RAG') {
-      // ── RAG MODE: generate syllabus from PDFs, inject as markdown ──────
-      instructions = PROFESSOR_RAG_PROMPT;
+    if (this.selectedAssistantId === 'professor' && sessionMode === 'FREE_ROAM') {
+      // ── FREE_ROAM MODE: no documents, zero initial latency ─────────────
+      // No summary generation call needed — the professor improvises.
+      instructions = PROFESSOR_FREE_ROAM_PROMPT;
+      initialState = {
+        session_mode: 'FREE_ROAM',
+        user_language: '',
+        behavioral_directives: [],
+        student_info: { name: '', education_level: '' },
+        current_topic: '',
+        topics_to_cover: [],
+        covered_concepts: [],
+        overall_evaluation: '',
+      } as AnyAssistantState;
+
+      const markdown = generateMarkdownSummary(initialState, 'FREE_ROAM');
+      instructions += '\n\n---\n' + markdown;
+      console.log(`[${this.sessionId}] Initial FREE_ROAM state (markdown):\n${markdown}`);
+
+    } else if (this.selectedAssistantId === 'professor' && sessionMode === 'RAG') {
+      // ── Legacy RAG MODE: generate syllabus from docs, inject as markdown ──
+      instructions = getAssistantInstructions(this.selectedAssistantId);
       try {
         const summarySourceFiles = this.selectedSummaryFiles.length > 0
           ? this.selectedSummaryFiles
@@ -355,7 +424,6 @@ export class SessionHandler {
             overall_evaluation: '',
           } as AnyAssistantState;
 
-          // Inject the initial state as a compact markdown checklist.
           const markdown = generateMarkdownSummary(initialState, 'RAG');
           instructions += '\n\n---\n' + markdown;
           console.log(`[${this.sessionId}] Initial RAG state (markdown):\n${markdown}`);
@@ -367,77 +435,62 @@ export class SessionHandler {
         );
       }
 
-    } else if (this.selectedAssistantId === 'professor' && sessionMode === 'FREE_ROAM') {
-      // ── FREE_ROAM MODE: no documents, zero initial latency ─────────────
-      // No summary generation call needed — the professor improvises.
-      instructions = PROFESSOR_FREE_ROAM_PROMPT;
-      initialState = {
-        session_mode: 'FREE_ROAM',
-        user_language: '',
-        behavioral_directives: [],
-        student_info: { name: '', education_level: '' },
-        current_topic: '',
-        topics_to_cover: [],
-        covered_concepts: [],
-        overall_evaluation: '',
-      } as AnyAssistantState;
-
-      const markdown = generateMarkdownSummary(initialState, 'FREE_ROAM');
-      instructions += '\n\n---\n' + markdown;
-      console.log(`[${this.sessionId}] Initial FREE_ROAM state (markdown):\n${markdown}`);
-
     } else {
       // ── Non-professor assistants: existing behaviour unchanged ──────────
       instructions = getAssistantInstructions(this.selectedAssistantId);
-      try {
-        const hasSummaryDocs = this.selectedSummaryFiles.length > 0;
-        const summarySourceFiles = hasSummaryDocs ? this.selectedSummaryFiles : [];
-        const { hash, text } = await documentService.getDocumentsHashAndText(summarySourceFiles);
-        const { index: docSummary, generationTokens: summaryTokens } =
-          await documentService.getOrGenerateSummary(hash, text);
-        if (summaryTokens) {
-          this.costTracker.recordSummaryUsage(summaryTokens.input, summaryTokens.output);
-        }
-        if (
-          docSummary &&
-          this.selectedAssistantId === 'audioguide'
-        ) {
-          initialState = {
-            user_language: '',
-            behavioral_directives: [],
-            visitor_info: { name: '', preferences: '' },
-            artworks_to_visit: docSummary.main_topics.map((t) => ({
-              artwork_name: t.topic,
-              highlights: t.subtopics,
-            })),
-            visitor_interests: [],
-            confusing_aspects: [],
-            overall_impression: '',
-          } as AnyAssistantState;
+      if (!FORCE_FULL_FILE_CONTEXT_MODE) {
+        try {
+          const hasSummaryDocs = this.selectedSummaryFiles.length > 0;
+          const summarySourceFiles = hasSummaryDocs ? this.selectedSummaryFiles : [];
+          const { hash, text } = await documentService.getDocumentsHashAndText(summarySourceFiles);
+          const { index: docSummary, generationTokens: summaryTokens } =
+            await documentService.getOrGenerateSummary(hash, text);
+          if (summaryTokens) {
+            this.costTracker.recordSummaryUsage(summaryTokens.input, summaryTokens.output);
+          }
+          if (
+            docSummary &&
+            this.selectedAssistantId === 'audioguide'
+          ) {
+            initialState = {
+              user_language: '',
+              behavioral_directives: [],
+              visitor_info: { name: '', preferences: '' },
+              artworks_to_visit: docSummary.main_topics.map((t) => ({
+                artwork_name: t.topic,
+                highlights: t.subtopics,
+              })),
+              visitor_interests: [],
+              confusing_aspects: [],
+              overall_impression: '',
+            } as AnyAssistantState;
 
-          instructions +=
-            '\n\n---\n## SESSION STATE (Stato Iniziale della Sessione)\n' +
-            'Il seguente JSON rappresenta lo stato iniziale. ' +
-            'Il campo `artworks_to_visit` contiene tutto il percorso da svolgere.\n\n' +
-            '```json\n' + JSON.stringify(initialState, null, 2) + '\n```';
+            instructions +=
+              '\n\n---\n## SESSION STATE (Stato Iniziale della Sessione)\n' +
+              'Il seguente JSON rappresenta lo stato iniziale. ' +
+              'Il campo `artworks_to_visit` contiene tutto il percorso da svolgere.\n\n' +
+              '```json\n' + JSON.stringify(initialState, null, 2) + '\n```';
+          }
+        } catch (err) {
+          console.warn(
+            `[${this.sessionId}] Failed to load doc summary (proceeding without constraint):`,
+            err instanceof Error ? err.message : String(err),
+          );
         }
-      } catch (err) {
-        console.warn(
-          `[${this.sessionId}] Failed to load doc summary (proceeding without constraint):`,
-          err instanceof Error ? err.message : String(err),
-        );
       }
     }
+    instructions = this.withPersistentFileContext(instructions);
     this.enrichedInstructions = instructions;
 
     // ── Initialise ContextManager ────────────────────────────────────────
     // Base instructions only (no memory block). The compact state is re-injected
     // by assembleSystemInstruction on each context switch.
-    const basePrompt = this.selectedAssistantId === 'professor' && sessionMode === 'FREE_ROAM'
-      ? PROFESSOR_FREE_ROAM_PROMPT
-      : this.selectedAssistantId === 'professor' && sessionMode === 'RAG'
-        ? PROFESSOR_RAG_PROMPT
-        : getAssistantInstructions(this.selectedAssistantId);
+    const basePromptRaw = this.selectedAssistantId === 'professor'
+      ? sessionMode === 'RAG'
+        ? getAssistantInstructions(this.selectedAssistantId)
+        : PROFESSOR_FREE_ROAM_PROMPT
+      : getAssistantInstructions(this.selectedAssistantId);
+    const basePrompt = this.withPersistentFileContext(basePromptRaw);
 
     this.contextManager = new ContextManager({
       sessionId: this.sessionId,
@@ -1249,9 +1302,12 @@ export class SessionHandler {
         // Best-effort cleanup of temporary uploads.
       }
       this.uploadedDocumentDir = null;
-      this.selectedSummaryFiles = [];
-      this.selectedRagFiles = [];
     }
+
+    this.selectedContextFiles = [];
+    this.selectedSummaryFiles = [];
+    this.selectedRagFiles = [];
+    this.persistentFileContextBlock = null;
 
     // Wait for the session log file to finish writing.
     await sessionLogPromise;
@@ -1323,6 +1379,38 @@ export class SessionHandler {
 
   // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+  private withPersistentFileContext(instructions: string): string {
+    if (!this.persistentFileContextBlock) return instructions;
+    if (instructions.includes('## PERSISTENT FILE CONTEXT')) return instructions;
+    return `${instructions}\n\n---\n${this.persistentFileContextBlock}`;
+  }
+
+  private buildPersistentFileContextBlock(
+    hash: string,
+    files: Array<{ name: string; normalizedText: string }>,
+  ): string {
+    const fileBlocks = files
+      .map((file) => {
+        return [
+          `### FILE: ${file.name}`,
+          '```text',
+          file.normalizedText,
+          '```',
+        ].join('\n');
+      })
+      .join('\n\n');
+
+    return [
+      '## PERSISTENT FILE CONTEXT',
+      'This section is always part of your active system instructions.',
+      'Use the content below as the canonical reference for the whole session, including reconnects and context switches.',
+      'Do not call document retrieval tools for information that is already present in this context.',
+      `Context hash: ${hash}`,
+      '',
+      fileBlocks,
+    ].join('\n');
+  }
+
   private sendJSON(obj: object) {
     if (this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(obj));
@@ -1360,6 +1448,10 @@ export class SessionHandler {
   private getOpeningPrompt(assistantId: AssistantId): string {
   switch (assistantId) {
     case 'professor':
+      if (FORCE_FULL_FILE_CONTEXT_MODE && this.selectedContextFiles.length > 0) {
+        return `Presentati come professore. Dichiara che userai il documento gia presente nel contesto di sistema e inizia chiedendo solo il nome dello studente.`;
+      }
+
       // Check if we have documents (RAG mode) or not (FREE_ROAM mode).
       if (this.selectedRagFiles.length > 0 || this.selectedSummaryFiles.length > 0) {
         // RAG mode: syllabus is already in the instructions from the document summary.

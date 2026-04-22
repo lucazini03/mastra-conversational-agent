@@ -1,8 +1,6 @@
 const startBtn = document.getElementById('startBtn');
   const stopBtn = document.getElementById('stopBtn');
   const testBtn = document.getElementById('testBtn');
-  const sendBtn = document.getElementById('sendBtn');
-  const chatInput = document.getElementById('chatInput');
   const assistantPicker = document.getElementById('assistantPicker');
   const statusEl = document.getElementById('status');
   const sessionHintEl = document.getElementById('sessionHint');
@@ -15,10 +13,8 @@ const startBtn = document.getElementById('startBtn');
   const soundBars = document.getElementById('soundBars');
   const robotRing = document.getElementById('robotRing');
   const robotRing2 = document.getElementById('robotRing2');
-  const summaryDocInput = document.getElementById('summaryDocInput');
-  const ragDocInput = document.getElementById('ragDocInput');
-  const summaryDocName = document.getElementById('summaryDocName');
-  const ragDocName = document.getElementById('ragDocName');
+  const contextDocInput = document.getElementById('contextDocInput');
+  const contextDocName = document.getElementById('contextDocName');
   const pageAssistantId = document.body?.dataset?.assistantId;
   const hasDebugUi = Boolean(assistantPicker && transcriptLog && systemLog);
   const statusBaseClass = statusEl?.classList.contains('status') ? 'status' : 'status-text';
@@ -287,21 +283,18 @@ const startBtn = document.getElementById('startBtn');
       }
 
       function setDocumentInputsDisabled(disabled) {
-        setDisabled(summaryDocInput, disabled);
-        setDisabled(ragDocInput, disabled);
+        setDisabled(contextDocInput, disabled);
       }
 
       async function uploadDocumentConfig() {
-        const summaryFile = summaryDocInput?.files?.[0] ?? null;
-        const ragFiles = ragDocInput?.files ? Array.from(ragDocInput.files) : [];
+        const contextFile = contextDocInput?.files?.[0] ?? null;
 
-        if (!summaryFile && ragFiles.length === 0) {
-          return { documentConfigId: null, summaryCount: 0, ragCount: 0, effectiveRagCount: 0 };
+        if (!contextFile) {
+          throw new Error('Seleziona un documento prima di avviare la sessione.');
         }
 
         const formData = new FormData();
-        if (summaryFile) formData.append('summaryDocument', summaryFile);
-        ragFiles.forEach((file) => formData.append('ragDocuments', file));
+        formData.append('contextDocument', contextFile);
 
         const response = await fetch('/api/document-config', {
           method: 'POST',
@@ -322,9 +315,7 @@ const startBtn = document.getElementById('startBtn');
 
         return {
           documentConfigId: payload?.documentConfigId ?? null,
-          summaryCount: Number(payload?.summaryCount ?? 0),
-          ragCount: Number(payload?.ragCount ?? 0),
-          effectiveRagCount: Number(payload?.effectiveRagCount ?? 0),
+          contextCount: Number(payload?.contextCount ?? 0),
         };
       }
 
@@ -534,15 +525,6 @@ const startBtn = document.getElementById('startBtn');
         await micVad.start();
       }
 
-      function sendTextPrompt() {
-        if (!ws || ws.readyState !== WebSocket.OPEN || !chatInput) return;
-        const text = chatInput.value.trim();
-        if (!text) return;
-        stopAndClearPlayback();
-        ws.send(JSON.stringify({ type: 'text_prompt', text }));
-        chatInput.value = '';
-      }
-
       async function startSession() {
         if (ws) return;
         sessionReady = false;
@@ -570,23 +552,17 @@ const startBtn = document.getElementById('startBtn');
 
         if (uploadResult.documentConfigId) {
           if (hasDebugUi) {
-            const mode =
-              uploadResult.summaryCount > 0 && uploadResult.ragCount > 0
-                ? `summary=${uploadResult.summaryCount}, rag=${uploadResult.ragCount}`
-                : uploadResult.summaryCount > 0
-                  ? `summary=${uploadResult.summaryCount} (reused for rag=${uploadResult.effectiveRagCount})`
-                  : `rag=${uploadResult.ragCount} (summary disabled)`;
-            logSystem(`Documents configured: ${mode}`);
+            logSystem(`Context document configured: files=${uploadResult.contextCount}`);
           } else {
             setHint(
-              `Documenti elaborati con successo — riepilogo: ${uploadResult.summaryCount} file, RAG: ${uploadResult.effectiveRagCount} fonte/i. Connessione in corso...`,
+              'Documento elaborato con successo. Connessione in corso...',
             );
           }
         } else {
           if (hasDebugUi) {
-            logSystem('No summary or RAG documents selected. Starting without document context.');
+            logSystem('Nessun documento di contesto selezionato.', 'error');
           } else {
-            setHint('Nessun documento caricato: la sessione partirà in modalità conversazione libera, senza contesto specifico.');
+            setHint('Nessun documento di contesto selezionato.');
           }
         }
 
@@ -609,8 +585,6 @@ const startBtn = document.getElementById('startBtn');
             startConversationTimer();
             setDisabled(stopBtn, false);
             setDisabled(testBtn, false);
-            setDisabled(sendBtn, false);
-            setDisabled(chatInput, false);
             setAssistantButtonsDisabled(true);
             setDocumentInputsDisabled(true);
             if (hasDebugUi) {
@@ -618,7 +592,7 @@ const startBtn = document.getElementById('startBtn');
               logSystem(`Microphone ready. Waiting for ${getSelectedAssistantLabel()}...`);
             } else {
               setStatus('Connesso', 'connected');
-              setHint('Sessione live attiva — parla liberamente o digita un messaggio. Il microfono è acceso.');
+              setHint('Sessione live attiva. Il microfono è acceso.');
             }
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
@@ -744,8 +718,6 @@ const startBtn = document.getElementById('startBtn');
           setDisabled(startBtn, false);
           setDisabled(stopBtn, true);
           setDisabled(testBtn, true);
-          setDisabled(sendBtn, true);
-          setDisabled(chatInput, true);
           setAssistantButtonsDisabled(false);
           setDocumentInputsDisabled(false);
           setStatus(hasDebugUi ? 'Idle' : 'Pronto', '');
@@ -771,29 +743,12 @@ const startBtn = document.getElementById('startBtn');
       testBtn?.addEventListener('click', () => {
         if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'simulate_disconnect' }));
       });
-      sendBtn?.addEventListener('click', () => sendTextPrompt());
-      chatInput?.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); sendTextPrompt(); } });
 
-      summaryDocInput?.addEventListener('change', () => {
-        const file = summaryDocInput.files?.[0];
-        if (!summaryDocName) return;
-        summaryDocName.textContent = file ? file.name : 'Nessun file selezionato';
-        summaryDocName.classList.toggle('visible', Boolean(file));
-      });
-
-      ragDocInput?.addEventListener('change', () => {
-        const files = ragDocInput.files ? Array.from(ragDocInput.files) : [];
-        if (!ragDocName) return;
-        if (files.length === 0) {
-          ragDocName.textContent = 'Nessun file selezionato';
-          ragDocName.classList.remove('visible');
-        } else if (files.length === 1) {
-          ragDocName.textContent = files[0].name;
-          ragDocName.classList.add('visible');
-        } else {
-          ragDocName.textContent = `${files.length} file selezionati`;
-          ragDocName.classList.add('visible');
-        }
+      contextDocInput?.addEventListener('change', () => {
+        const file = contextDocInput.files?.[0];
+        if (!contextDocName) return;
+        contextDocName.textContent = file ? file.name : 'Nessun file selezionato';
+        contextDocName.classList.toggle('visible', Boolean(file));
       });
 
       renderAssistantButtons();

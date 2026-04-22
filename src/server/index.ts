@@ -26,7 +26,7 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
     fileSize: 25 * 1024 * 1024,
-    files: 20,
+    files: 1,
   },
 });
 
@@ -68,17 +68,13 @@ app.get('/health', (_req, res) => {
 
 app.post(
   '/api/document-config',
-  upload.fields([
-    { name: 'summaryDocument', maxCount: 1 },
-    { name: 'ragDocuments', maxCount: 20 },
-  ]),
+  upload.fields([{ name: 'contextDocument', maxCount: 1 }]),
   async (req, res) => {
     const allFiles = (req.files ?? {}) as Record<string, Express.Multer.File[]>;
-    const summaryUploads = allFiles.summaryDocument ?? [];
-    const ragUploads = allFiles.ragDocuments ?? [];
+    const contextUploads = allFiles.contextDocument ?? [];
 
-    if (summaryUploads.length === 0 && ragUploads.length === 0) {
-      res.status(400).json({ error: 'At least one summary or RAG document is required.' });
+    if (contextUploads.length === 0) {
+      res.status(400).json({ error: 'A context document is required.' });
       return;
     }
 
@@ -86,22 +82,18 @@ app.post(
     const uploadDir = path.join(uploadsRootDir, uploadId);
 
     try {
-      const summaryFiles = await saveUploadedFiles(summaryUploads, path.join(uploadDir, 'summary'));
-      const ragFiles = await saveUploadedFiles(ragUploads, path.join(uploadDir, 'rag'));
+      const contextFiles = await saveUploadedFiles(contextUploads, path.join(uploadDir, 'context'));
 
       const created = await documentConfigStore.create({
         uploadDir,
-        summaryFiles,
-        ragFiles,
+        contextFiles,
+        summaryFiles: [],
+        ragFiles: [],
       });
-
-      const effectiveRagFiles = ragFiles.length > 0 ? ragFiles : [...summaryFiles];
 
       res.json({
         documentConfigId: created.id,
-        summaryCount: summaryFiles.length,
-        ragCount: ragFiles.length,
-        effectiveRagCount: effectiveRagFiles.length,
+        contextCount: contextFiles.length,
       });
     } catch (err) {
       await fs.rm(uploadDir, { recursive: true, force: true }).catch(() => undefined);
