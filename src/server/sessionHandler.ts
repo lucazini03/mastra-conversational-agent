@@ -211,7 +211,7 @@ export class SessionHandler {
           // the old WS is torn down. The buffered PCM is replayed to the new
           // WS after the swap (see flushPendingAudioChunks).
           if (this.isContextSwitching) {
-            const MAX_BUFFERED_BYTES = 64 * 1024; // ~2 s at 16 kHz 16-bit mono
+            const MAX_BUFFERED_BYTES = 256 * 1024; // ~8 s at 16 kHz 16-bit mono
             const bufferedTotal = this.pendingAudioChunks.reduce((s, b) => s + b.byteLength, 0);
             if (bufferedTotal < MAX_BUFFERED_BYTES) {
               this.pendingAudioChunks.push(aligned);
