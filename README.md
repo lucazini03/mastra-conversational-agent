@@ -414,18 +414,10 @@ Una sessione è divisa in **episodi** — uno per ogni connessione WebSocket (in
 
 ---
 
-## 11. Altre personalità assistant
+## 11. Personalità assistant
 
-| ID | Nome | Note |
-|----|------|------|
-| `professor` | Il Professore | Persona principale; RAG o Free Roam a seconda dei documenti caricati |
-| `interview_coach` | HR Interviewer | Simula un colloquio di lavoro; usa RAG per estrarre azienda/ruolo dalla job description caricata |
-| `study_tutor` | Study Tutor | Spiega concetti; traccia concetti compresi/in difficoltà |
-| `audioguide` | Audio Guide | Guida di museo; usa RAG sulle descrizioni delle opere |
-| `immigration_assistant` | Immigration Assistant | Consigli pratici in linguaggio semplice; vocabolario A1/A2 |
-| `language_tutor` | Language Tutor | Conversazione guidata; integra le correzioni nel flusso |
-
-Tutte le personalità condividono la stessa infrastruttura di WebSocket cycling, RAG e session logging. Ognuna ha il proprio schema di stato compatto in `src/services/contextManager/schemas.ts`.
+In questo branch è presente una sola personalità: `professor`, con prompt `PROFESSOR_FILE_CONTEXT_PROMPT`.
+Il flusso è ottimizzato per caricare un unico documento e iniettarne il contenuto completo nel contesto persistente della sessione.
 
 ---
 

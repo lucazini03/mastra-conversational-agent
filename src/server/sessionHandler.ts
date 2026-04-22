@@ -5,7 +5,7 @@
 //   Browser mic PCM → GeminiLive → Browser speaker PCM
 //
 // Protocol (all text frames, JSON):
-//   Browser → Server  { type: 'start_session', assistantId?: string, documentConfigId?: string }
+//   Browser → Server  { type: 'start_session', documentConfigId?: string }
 //   Browser → Server  { type: 'end_session' }
 //   Browser → Server  { type: 'audio_chunk', data: string }   ← base64 Int16 PCM, 16kHz mono
 //   Browser → Server  { type: 'text_prompt', text: string }
@@ -20,10 +20,7 @@ import { rm } from 'node:fs/promises';
 import { createProfessorAgent, type ProfessorAgent } from '../agent/agentFactory.js';
 import {
   DEFAULT_ASSISTANT_ID,
-  getAssistantInstructions,
-  isAssistantId,
   PROFESSOR_FILE_CONTEXT_PROMPT,
-  PROFESSOR_FREE_ROAM_PROMPT,
   type AssistantId,
 } from '../config/professorConfig.js';
 import { BrowserRagService } from './ragService.js';
@@ -84,10 +81,7 @@ export class SessionHandler {
   private ragService: BrowserRagService | null = null;
   private readonly deps: SessionHandlerDeps;
 
-  // ── Document summary injected into instructions at session start ─────────
-  // Contains the topic-constraint block appended to base instructions for
-  // 'professor' and 'audioguide' assistants. Null when no PDFs are loaded or
-  // the assistant type doesn't need constraining.
+  // ── Instructions injected at session start ───────────────────────────────
   private enrichedInstructions: string | null = null;
 
   // ── Context Compaction (Observational Memory) ─────────────────────────────
@@ -164,7 +158,6 @@ export class SessionHandler {
       type: string;
       data?: string;
       text?: string;
-      assistantId?: string;
       documentConfigId?: string;
     };
     try {
@@ -176,7 +169,7 @@ export class SessionHandler {
 
     switch (msg.type) {
       case 'start_session':
-        this.selectedAssistantId = this.resolveAssistantId(msg.assistantId);
+        this.selectedAssistantId = DEFAULT_ASSISTANT_ID;
         await this.startSession(msg.documentConfigId);
         break;
       case 'end_session':
@@ -361,147 +354,46 @@ export class SessionHandler {
       }
     }
 
-    // ── Determine session mode (professor-only: RAG vs FREE_ROAM) ──────────
-    const hasDocuments = this.selectedSummaryFiles.length > 0 || this.selectedRagFiles.length > 0;
-    const sessionMode: SessionMode | undefined =
-      this.selectedAssistantId === 'professor'
-        ? (FORCE_FULL_FILE_CONTEXT_MODE ? 'FREE_ROAM' : hasDocuments ? 'RAG' : 'FREE_ROAM')
-        : undefined;
+    const sessionMode: SessionMode = 'FREE_ROAM';
+    const hasDocuments = this.selectedContextFiles.length > 0;
+    console.log(
+      `[${this.sessionId}] Professor session mode: ${sessionMode} (context files: ${this.selectedContextFiles.length}, docs: ${hasDocuments ? 'yes' : 'none'})`,
+    );
 
-    if (sessionMode) {
-      console.log(
-        `[${this.sessionId}] Professor session mode: ${sessionMode} (context files: ${this.selectedContextFiles.length}, rag docs: ${hasDocuments ? 'yes' : 'none'})`,
-      );
-    }
-
-    // ── Build instructions based on assistant type and session mode ───────
+    // ── Build instructions for professor_file_context_prompt ─────────────
     let instructions: string;
     let initialState: AnyAssistantState | null = null;
 
-    if (this.selectedAssistantId === 'professor' && sessionMode === 'FREE_ROAM') {
-      // ── FREE_ROAM MODE: no documents, zero initial latency ─────────────
-      // No summary generation call needed — the professor improvises.
-      instructions = FORCE_FULL_FILE_CONTEXT_MODE
-        ? PROFESSOR_FILE_CONTEXT_PROMPT
-        : PROFESSOR_FREE_ROAM_PROMPT;
-      initialState = {
-        session_mode: 'FREE_ROAM',
-        user_language: '',
-        behavioral_directives: [],
-        student_info: { name: '', education_level: '' },
-        current_topic: '',
-        topics_to_cover: [],
-        covered_concepts: [],
-        overall_evaluation: '',
-      } as AnyAssistantState;
+    instructions = PROFESSOR_FILE_CONTEXT_PROMPT;
+    initialState = {
+      session_mode: 'FREE_ROAM',
+      user_language: '',
+      behavioral_directives: [],
+      student_info: { name: '', education_level: '' },
+      current_topic: '',
+      topics_to_cover: [],
+      covered_concepts: [],
+      overall_evaluation: '',
+    } as AnyAssistantState;
 
-      const markdown = generateMarkdownSummary(initialState, 'FREE_ROAM');
-      instructions += '\n\n---\n' + markdown;
-      console.log(`[${this.sessionId}] Initial FREE_ROAM state (markdown):\n${markdown}`);
+    const markdown = generateMarkdownSummary(initialState, 'FREE_ROAM');
+    instructions += '\n\n---\n' + markdown;
+    console.log(`[${this.sessionId}] Initial FREE_ROAM state (markdown):\n${markdown}`);
 
-    } else if (this.selectedAssistantId === 'professor' && sessionMode === 'RAG') {
-      // ── Legacy RAG MODE: generate syllabus from docs, inject as markdown ──
-      instructions = getAssistantInstructions(this.selectedAssistantId);
-      try {
-        const summarySourceFiles = this.selectedSummaryFiles.length > 0
-          ? this.selectedSummaryFiles
-          : [];
-        const { hash, text } = await documentService.getDocumentsHashAndText(summarySourceFiles);
-        const { index: docSummary, generationTokens: summaryTokens } =
-          await documentService.getOrGenerateSummary(hash, text);
-        if (summaryTokens) {
-          this.costTracker.recordSummaryUsage(summaryTokens.input, summaryTokens.output);
-        }
-        if (docSummary) {
-          initialState = {
-            session_mode: 'RAG',
-            user_language: '',
-            behavioral_directives: [],
-            student_info: { name: '', education_level: '' },
-            current_topic: '',
-            topics_to_cover: docSummary.main_topics.map((t) => ({
-              main_topic: t.topic,
-              subtopics: t.subtopics.map((s) => ({ name: s, mastery_score: 0 })),
-            })),
-            covered_concepts: [],
-            overall_evaluation: '',
-          } as AnyAssistantState;
-
-          const markdown = generateMarkdownSummary(initialState, 'RAG');
-          instructions += '\n\n---\n' + markdown;
-          console.log(`[${this.sessionId}] Initial RAG state (markdown):\n${markdown}`);
-        }
-      } catch (err) {
-        console.warn(
-          `[${this.sessionId}] Failed to load doc summary (proceeding without syllabus):`,
-          err instanceof Error ? err.message : String(err),
-        );
-      }
-
-    } else {
-      // ── Non-professor assistants: existing behaviour unchanged ──────────
-      instructions = getAssistantInstructions(this.selectedAssistantId);
-      if (!FORCE_FULL_FILE_CONTEXT_MODE) {
-        try {
-          const hasSummaryDocs = this.selectedSummaryFiles.length > 0;
-          const summarySourceFiles = hasSummaryDocs ? this.selectedSummaryFiles : [];
-          const { hash, text } = await documentService.getDocumentsHashAndText(summarySourceFiles);
-          const { index: docSummary, generationTokens: summaryTokens } =
-            await documentService.getOrGenerateSummary(hash, text);
-          if (summaryTokens) {
-            this.costTracker.recordSummaryUsage(summaryTokens.input, summaryTokens.output);
-          }
-          if (
-            docSummary &&
-            this.selectedAssistantId === 'audioguide'
-          ) {
-            initialState = {
-              user_language: '',
-              behavioral_directives: [],
-              visitor_info: { name: '', preferences: '' },
-              artworks_to_visit: docSummary.main_topics.map((t) => ({
-                artwork_name: t.topic,
-                highlights: t.subtopics,
-              })),
-              visitor_interests: [],
-              confusing_aspects: [],
-              overall_impression: '',
-            } as AnyAssistantState;
-
-            instructions +=
-              '\n\n---\n## SESSION STATE (Stato Iniziale della Sessione)\n' +
-              'Il seguente JSON rappresenta lo stato iniziale. ' +
-              'Il campo `artworks_to_visit` contiene tutto il percorso da svolgere.\n\n' +
-              '```json\n' + JSON.stringify(initialState, null, 2) + '\n```';
-          }
-        } catch (err) {
-          console.warn(
-            `[${this.sessionId}] Failed to load doc summary (proceeding without constraint):`,
-            err instanceof Error ? err.message : String(err),
-          );
-        }
-      }
-    }
     instructions = this.withPersistentFileContext(instructions);
     this.enrichedInstructions = instructions;
 
     // ── Initialise ContextManager ────────────────────────────────────────
     // Base instructions only (no memory block). The compact state is re-injected
     // by assembleSystemInstruction on each context switch.
-    const basePromptRaw = this.selectedAssistantId === 'professor'
-      ? sessionMode === 'RAG'
-        ? getAssistantInstructions(this.selectedAssistantId)
-        : FORCE_FULL_FILE_CONTEXT_MODE
-          ? PROFESSOR_FILE_CONTEXT_PROMPT
-          : PROFESSOR_FREE_ROAM_PROMPT
-      : getAssistantInstructions(this.selectedAssistantId);
+    const basePromptRaw = PROFESSOR_FILE_CONTEXT_PROMPT;
     const basePrompt = this.withPersistentFileContext(basePromptRaw);
 
     this.contextManager = new ContextManager({
       sessionId: this.sessionId,
       assistantId: this.selectedAssistantId,
       baseSystemPrompt: basePrompt,
-      sessionMode,
+      sessionMode: 'FREE_ROAM',
     });
     // Seed the initial state so the first extraction merges INTO it.
     if (initialState) {
@@ -541,9 +433,9 @@ export class SessionHandler {
         // rag warmup failed will be emitted when the user starts a session and the ragService tries to load the embedding model and the vector store. We want to warm up the ragService at this point to minimize latency on the first RAG query, but if it fails we don't want to block the session start — the assistant can still function without RAG, albeit with less relevant responses until it's ready. The warning log will help us identify any issues with the RAG warmup process in production. 
       }
 
-      // Use enriched instructions (with doc topic-constraint) when available.
+      // Use enriched instructions (with persistent full-file context) when available.
       const instructions =
-        this.enrichedInstructions ?? getAssistantInstructions(this.selectedAssistantId);
+        this.enrichedInstructions ?? PROFESSOR_FILE_CONTEXT_PROMPT;
       createdProfessor = createProfessorAgent({
         instructions,
         name: this.getAssistantLabel(this.selectedAssistantId),
@@ -1426,63 +1318,11 @@ export class SessionHandler {
     this.sendJSON({ type: 'status', message });
   }
 
-  private resolveAssistantId(rawAssistantId?: string): AssistantId {
-    if (isAssistantId(rawAssistantId)) return rawAssistantId;
-    return DEFAULT_ASSISTANT_ID;
+  private getAssistantLabel(_assistantId: AssistantId): string {
+    return 'Il Professore';
   }
 
-  private getAssistantLabel(assistantId: AssistantId): string {
-    switch (assistantId) {
-      case 'professor':
-        return 'Il Professore';
-      case 'interview_coach':
-        return 'Interview Coach';
-      case 'study_tutor':
-        return 'Study Tutor';
-      case 'audioguide':
-        return 'Audioguida';
-      case 'immigration_assistant':
-        return 'Immigration Assistant';
-      case 'language_tutor':
-        return 'Language Tutor';
-      default:
-        return 'MemorAIz Assistant';
-    }
+  private getOpeningPrompt(_assistantId: AssistantId): string {
+    return `Presentati come il professore. Deduci la materia dal documento nel contesto persistente e chiedi allo studente solo il nome.`;
   }
-
-  private getOpeningPrompt(assistantId: AssistantId): string {
-  switch (assistantId) {
-    case 'professor':
-      if (FORCE_FULL_FILE_CONTEXT_MODE && this.selectedContextFiles.length > 0) {
-        return `Presentati e di' per esempio 'cos'abbiamo oggi in programma? Ah, interessante! [argomento del documento]`;
-      }
-
-      // Check if we have documents (RAG mode) or not (FREE_ROAM mode).
-      if (this.selectedRagFiles.length > 0 || this.selectedSummaryFiles.length > 0) {
-        // RAG mode: syllabus is already in the instructions from the document summary.
-        return `Hai gia il PROGRAMMA nelle tue istruzioni — NON chiamare search_documents adesso. Presentati come "il professore di [materia]" (deducila dal programma) e chiedi allo studente il suo nome. Sii diretto e formale, ma non freddo.`;
-      } else {
-        // FREE_ROAM mode: no documents, ask the student what they want to study.
-        return `Presentati come il professore. Chiedi allo studente il suo nome, e su cosa vuole essere interrogato oggi. Sii diretto e formale, ma non freddo.`;
-      }
-
-    case 'interview_coach':
-      return `Usa search_documents adesso per estrarre: nome dell'azienda, titolo del ruolo, responsabilità principali, requisiti. Poi, immediatamente, apri il colloquio presentandoti come un HR della società trovata nel documento. Usa "Lei". Annuncia che al termine darai un feedback. Chiedi se il candidato è pronto.`;
-
-    case 'study_tutor':
-      return `Usa search_documents adesso per capire l'argomento principale del documento. Poi presentati in modo amichevole e informale, dì cosa hai trovato e chiedi allo studente su cosa vuole lavorare oggi — se vuole capire meglio qualcosa, ripassare, o fare domande.`;
-
-    case 'audioguide':
-      return `Usa search_documents adesso per identificare il museo, il sito, le opere o i reperti presenti nel documento. Poi dai il benvenuto al visitatore in modo evocativo e narrativo, presentando brevemente il percorso che farete insieme. Chiedi se è pronto per iniziare. Durante la visita, quando l'utente cita un'opera specifica, verifica sempre con search_documents prima di dire che non esiste nel materiale.`;
-
-    case 'immigration_assistant':
-      return `Presentati in modo semplice e rassicurante. Usa frasi corte e paratattiche.`;
-
-    case 'language_tutor':
-      return `Saluta l'utente in modo amichevole e chiedi subito: quale lingua vuole praticare, il suo livello approssimativo, e se preferisce un contesto specifico o una conversazione libera.`;
-
-    default:
-      return `Usa search_documents per esplorare il documento caricato. Poi presentati come assistente di MemorAIz e chiedi all'utente come puoi aiutarlo oggi.`;
-  }
-}
 }

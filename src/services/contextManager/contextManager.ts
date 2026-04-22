@@ -374,15 +374,9 @@ export class ContextManager extends EventEmitter<ContextManagerEvents> {
       `5. Your next action must be a DIRECT CONTINUATION — respond to the user's last message or wait quietly for their input.`,
     );
 
-    // 3. Session state — markdown for professor (compact), JSON for others
-    if (this.assistantId === 'professor' && this.sessionMode) {
-      const markdown = generateMarkdownSummary(state, this.sessionMode);
-      sections.push(`\n---\n${markdown}`);
-    } else {
-      sections.push(
-        `\n---\n## SESSION STATE (Compact State)\nThe following JSON represents the accumulated state of this conversation so far. Use it to maintain continuity — do NOT ask the user to repeat information already captured here.\n\n\`\`\`json\n${JSON.stringify(state, null, 2)}\n\`\`\``,
-      );
-    }
+    // 3. Session state — compact markdown for professor
+    const markdown = generateMarkdownSummary(state, this.sessionMode ?? 'FREE_ROAM');
+    sections.push(`\n---\n${markdown}`);
 
     // 4. Recent conversation transcript (structured turns + anti-repetition)
     if (this.structuredBufferTurns.length > 0) {
@@ -431,10 +425,7 @@ export class ContextManager extends EventEmitter<ContextManagerEvents> {
   }
   // ── Extraction prompt builders ─────────────────────────────────────────
 
-  /**
-   * Builds the extraction prompt based on assistant type and session mode.
-   * Professor gets mode-specific prompts; all other assistants use the generic one.
-   */
+  /** Builds the extraction prompt for the professor mode in this branch. */
   private buildExtractionPrompt(existingStateJSON: string, deltaText: string): string {
     const header = `You are a memory extraction engine for a voice conversation. You receive the current JSON state and a new transcript delta. You must output the updated state.
 
@@ -447,7 +438,7 @@ ${deltaText}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
 
     // ── Professor RAG: update mastery scores on fixed syllabus ────────────
-    if (this.assistantId === 'professor' && this.sessionMode === 'RAG') {
+    if (this.sessionMode === 'RAG') {
       return `${header}
 
 ═══════════════════════════════════════════════════════
@@ -475,7 +466,7 @@ RULE 2 — OTHER FIELDS
     }
 
     // ── Professor FREE_ROAM: track new concepts on-the-fly ───────────────
-    if (this.assistantId === 'professor' && this.sessionMode === 'FREE_ROAM') {
+    if (this.sessionMode === 'FREE_ROAM') {
       return `${header}
 
 ═══════════════════════════════════════════════════════
@@ -505,32 +496,33 @@ RULE 3 — OTHER FIELDS
 - Be concise: short phrases, not full sentences.`;
     }
 
-    // ── Generic prompt for all non-professor assistants ───────────────────
     return `${header}
 
 ═══════════════════════════════════════════════════════
-RULE 1 — SHRINKING LISTS (topics_to_cover / artworks_to_visit)
+RULE 1 — current_topic
 ═══════════════════════════════════════════════════════
-If the schema includes a shrinking list (topics_to_cover, artworks_to_visit, etc.):
-- When a subtopic/item is explicitly addressed by the [model] in the delta, REMOVE it.
-- NEVER add new items. Only remove covered ones.
-- If a parent has zero remaining children after removal, delete the parent entry.
+If the user changed the subject in this delta, update current_topic to the new subject.
 
 ═══════════════════════════════════════════════════════
-RULE 2 — PERFORMANCE TRACKING
+RULE 2 — covered_concepts: TRACK NEW CONCEPTS
 ═══════════════════════════════════════════════════════
-If the schema includes performance arrays (candidate_strengths, visitor_interests, etc.):
-- ADD entries only based on what was explicitly demonstrated in the delta.
-- Be specific and concise per entry.
+Identify specific concepts the professor ([model]) discussed or asked about in this delta.
+Summarize each into 2-3 words.
+Add new concepts to covered_concepts with a mastery_score:
+  3 = student answered correctly without help
+  2 = student answered partially or with hints
+  1 = student didn't know / professor had to explain
+Do NOT duplicate concepts already in the list. If a concept was re-discussed, update its score.
 
 ═══════════════════════════════════════════════════════
 RULE 3 — OTHER FIELDS
 ═══════════════════════════════════════════════════════
-- APPEND to behavioral_directives for any new user preference or tone observation.
-- UPDATE personal info fields if new data appears.
-- UPDATE evaluation/impression fields to reflect current progress.
-- Be concise: short phrases, not full sentences.
-- Only include information explicitly present in the transcript.`;
+- KEEP session_mode unchanged (always "FREE_ROAM").
+- topics_to_cover: leave empty (not used in FREE_ROAM mode).
+- APPEND to behavioral_directives for new user preferences.
+- UPDATE student_info if new data appears.
+- UPDATE overall_evaluation to reflect progress.
+- Be concise: short phrases, not full sentences.`;
   }
 
   // ── Switch emission ──────────────────────────────────────────────────────
@@ -553,7 +545,7 @@ RULE 3 — OTHER FIELDS
     console.log(`[${this.sessionId}] ── Extracted JSON state:`);
     console.log(JSON.stringify(this.currentState, null, 2));
 
-    if (this.assistantId === 'professor' && this.sessionMode && this.currentState) {
+    if (this.sessionMode && this.currentState) {
       const markdown = generateMarkdownSummary(this.currentState, this.sessionMode);
       console.log(`[${this.sessionId}] ── Produced Markdown summary:`);
       console.log(markdown);

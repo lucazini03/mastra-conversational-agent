@@ -1,7 +1,6 @@
 const startBtn = document.getElementById('startBtn');
   const stopBtn = document.getElementById('stopBtn');
   const testBtn = document.getElementById('testBtn');
-  const assistantPicker = document.getElementById('assistantPicker');
   const statusEl = document.getElementById('status');
   const sessionHintEl = document.getElementById('sessionHint');
   const conversationTimerEl = document.getElementById('conversationTimer');
@@ -15,23 +14,8 @@ const startBtn = document.getElementById('startBtn');
   const robotRing2 = document.getElementById('robotRing2');
   const contextDocInput = document.getElementById('contextDocInput');
   const contextDocName = document.getElementById('contextDocName');
-  const pageAssistantId = document.body?.dataset?.assistantId;
-  const hasDebugUi = Boolean(assistantPicker && transcriptLog && systemLog);
+  const hasDebugUi = Boolean(transcriptLog && systemLog);
   const statusBaseClass = statusEl?.classList.contains('status') ? 'status' : 'status-text';
-
-      const ASSISTANTS = [
-        { id: 'professor', label: 'Il Professore' },
-        { id: 'interview_coach', label: 'Intervista di lavoro' },
-        { id: 'study_tutor', label: 'Tutor per lo studio' },
-        { id: 'audioguide', label: 'Audioguida' },
-        { id: 'immigration_assistant', label: 'Immigrazione' },
-        { id: 'language_tutor', label: 'Tutor linguistico' },
-      ];
-
-      let selectedAssistantId =
-        typeof pageAssistantId === 'string' && pageAssistantId.trim()
-          ? pageAssistantId.trim()
-          : ASSISTANTS[0].id;
       let ws = null;
       let micVad = null;
       let sessionReady = false;
@@ -275,13 +259,6 @@ const startBtn = document.getElementById('startBtn');
         if (connectionTimerEl) connectionTimerEl.textContent = '00:00';
       }
 
-      function setAssistantButtonsDisabled(disabled) {
-        if (!assistantPicker) return;
-        assistantPicker.querySelectorAll('button').forEach(b => {
-          b.disabled = disabled;
-        });
-      }
-
       function setDocumentInputsDisabled(disabled) {
         setDisabled(contextDocInput, disabled);
       }
@@ -320,25 +297,7 @@ const startBtn = document.getElementById('startBtn');
       }
 
       function getSelectedAssistantLabel() {
-        return ASSISTANTS.find(a => a.id === selectedAssistantId)?.label ?? 'Assistant';
-      }
-
-      function renderAssistantButtons() {
-        if (!assistantPicker) return;
-        assistantPicker.innerHTML = '';
-        ASSISTANTS.forEach(assistant => {
-          const btn = document.createElement('button');
-          btn.type = 'button';
-          btn.className = `assistant-btn${assistant.id === selectedAssistantId ? ' active' : ''}`;
-          btn.textContent = assistant.label;
-          btn.addEventListener('click', () => {
-            if (ws) return;
-            selectedAssistantId = assistant.id;
-            renderAssistantButtons();
-            setStatus(`Selected: ${assistant.label}`);
-          });
-          assistantPicker.appendChild(btn);
-        });
+        return 'Il Professore';
       }
 
       // ── Audio helpers ─────────────────────────────────────────────────────────
@@ -578,14 +537,12 @@ const startBtn = document.getElementById('startBtn');
             ws.send(
               JSON.stringify({
                 type: 'start_session',
-                assistantId: selectedAssistantId,
                 documentConfigId: uploadResult.documentConfigId,
               }),
             );
             startConversationTimer();
             setDisabled(stopBtn, false);
             setDisabled(testBtn, false);
-            setAssistantButtonsDisabled(true);
             setDocumentInputsDisabled(true);
             if (hasDebugUi) {
               setStatus(`Connecting to ${getSelectedAssistantLabel()}...`);
@@ -718,7 +675,6 @@ const startBtn = document.getElementById('startBtn');
           setDisabled(startBtn, false);
           setDisabled(stopBtn, true);
           setDisabled(testBtn, true);
-          setAssistantButtonsDisabled(false);
           setDocumentInputsDisabled(false);
           setStatus(hasDebugUi ? 'Idle' : 'Pronto', '');
           if (hasDebugUi) {
@@ -750,6 +706,4 @@ const startBtn = document.getElementById('startBtn');
         contextDocName.textContent = file ? file.name : 'Nessun file selezionato';
         contextDocName.classList.toggle('visible', Boolean(file));
       });
-
-      renderAssistantButtons();
     

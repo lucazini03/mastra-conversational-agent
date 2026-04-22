@@ -1,9 +1,6 @@
 // src/services/contextManager/schemas.ts
 //
-// Zod schemas for the compact memory state per assistant persona.
-// Each schema defines what the lightweight extraction model should produce
-// when summarising a conversation delta. All schemas include the mandatory
-// `behavioral_directives` field.
+// Zod schema for compact professor memory state.
 
 import { z } from 'zod';
 import type { AssistantId } from '../../config/professorConfig.js';
@@ -79,85 +76,10 @@ export const professorStateSchema = z.object({
   overall_evaluation: z.string().describe('Running synthesis of the student performance. Update after each verified topic.'),
 });
 
-// ── Interview Coach ──────────────────────────────────────────────────────────
-
-export const interviewCoachStateSchema = z.object({
-  ...baseFields,
-  company_name: z.string().optional().describe('Name of the company extracted from documents.'),
-  role_title: z.string().optional().describe('Job role title being interviewed for.'),
-  interview_phase: z.string().optional().describe('Current phase: opening, motivational, STAR, technical, expectations, closing, feedback.'),
-  questions_asked: z.number().describe('Number of interview questions asked.'),
-  candidate_strengths: z.array(z.string()).describe('Strengths observed in the candidate.'),
-  candidate_weaknesses: z.array(z.string()).describe('Weaknesses or gaps observed.'),
-  star_responses_quality: z.string().optional().describe('General quality assessment of STAR method responses.'),
-  optional_notes: z.string().optional().describe('Any [optional] additional notes or observations the coach should keep in mind.'),
-});
-
-// ── Study Tutor ──────────────────────────────────────────────────────────────
-
-export const studyTutorStateSchema = z.object({
-  ...baseFields,
-  student_name: z.string().optional().describe('Name of the student, if provided.'),
-  current_topic: z.string().optional().describe('The topic currently being studied / explained.'),
-  mode: z.string().optional().describe('Current interaction mode: explaining, quizzing, reviewing.'),
-  concepts_understood: z.array(z.string()).describe('Concepts the student has demonstrated understanding of.'),
-  concepts_struggling: z.array(z.string()).describe('Concepts the student is still struggling with.'),
-  analogies_used: z.array(z.string()).describe('Analogies or examples that were effective.'),
-  optional_notes: z.string().optional().describe('Any [optional] additional notes or observations the tutor should keep in mind.'),
-});
-
-// ── Audioguide ───────────────────────────────────────────────────────────────
-
-export const audioguideStateSchema = z.object({
-  ...baseFields,
-  visitor_info: z.object({
-    name: z.string().describe('Name of the visitor, if provided.'),
-    preferences: z.string().describe('Visitor preferences or visit style (e.g. fast, detailed, interactive).'),
-  }).describe('Basic information about the visitor.'),
-  artworks_to_visit: z.array(z.object({
-    artwork_name: z.string().describe('Name of the artwork, exhibit, or room still to be described.'),
-    highlights: z.array(z.string()).describe('Key aspects or details of this artwork not yet described.'),
-  })).describe(
-    'DECREASING list of remaining artworks/exhibits. When an artwork has been fully described, REMOVE it from this list and record visitor reactions in visitor_interests or confusing_aspects instead. Never add new items here.',
-  ),
-  visitor_interests: z.array(z.string()).describe('Aspects, artworks, or topics the visitor showed particular interest in — with brief notes per entry.'),
-  confusing_aspects: z.array(z.string()).describe('Aspects or artworks the visitor found confusing or needed clarification on — with brief notes per entry.'),
-  overall_impression: z.string().describe('Running synthesis of the visit experience so far.'),
-});
-
-// ── Immigration Assistant ────────────────────────────────────────────────────
-
-export const immigrationAssistantStateSchema = z.object({
-  ...baseFields,
-  user_situation: z.string().optional().describe('Brief summary of the user\'s situation as understood so far.'),
-  steps_given: z.array(z.string()).describe('Practical steps already communicated to the user.'),
-  pending_questions: z.array(z.string()).describe('Questions the assistant still needs to clarify with the user.'),
-  referrals: z.array(z.string()).describe('Offices or associations the user was referred to.'),
-  optional_notes: z.string().optional().describe('Any [optional] additional notes or observations the assistant should keep in mind.'),
-});
-
-// ── Language Tutor ───────────────────────────────────────────────────────────
-
-export const languageTutorStateSchema = z.object({
-  ...baseFields,
-  target_language: z.string().optional().describe('The language the user is practicing.'),
-  proficiency_level: z.string().optional().describe('Declared or estimated proficiency level.'),
-  scenario: z.string().optional().describe('Current conversation scenario if any (e.g. "at the airport").'),
-  corrections_made: z.array(z.string()).describe('Grammar or vocabulary corrections given during the session.'),
-  recurring_errors: z.array(z.string()).describe('Error patterns that keep repeating.'),
-  vocabulary_introduced: z.array(z.string()).describe('New words or phrases the tutor introduced.'),
-  optional_notes: z.string().optional().describe('Any [optional] additional notes or observations the tutor should keep in mind.'),
-});
-
 // ── Schema registry ──────────────────────────────────────────────────────────
 
 export const ASSISTANT_STATE_SCHEMAS = {
   professor: professorStateSchema,
-  interview_coach: interviewCoachStateSchema,
-  study_tutor: studyTutorStateSchema,
-  audioguide: audioguideStateSchema,
-  immigration_assistant: immigrationAssistantStateSchema,
-  language_tutor: languageTutorStateSchema,
 } as const satisfies Record<AssistantId, z.ZodType>;
 
 export type AssistantStateSchemas = typeof ASSISTANT_STATE_SCHEMAS;
