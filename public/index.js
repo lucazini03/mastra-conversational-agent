@@ -31,6 +31,7 @@ let conversationStartAt = null;
 let conversationTimerInterval = null;
 let ttsSuppressionUntilMs = 0;
 let ttsSuppressionDropCount = 0;
+let isVadActive = false;
 let isSpeaking = false;
 const activePlaybackSources = new Set();
 
@@ -255,6 +256,7 @@ function schedulePlaybackChunk(int16) {
 }
 
 function stopMicCapture() {
+  isVadActive = false;
   ttsSuppressionUntilMs = 0;
   ttsSuppressionDropCount = 0;
   if (micVad) {
@@ -276,11 +278,24 @@ async function startMicCapture() {
     minSpeechMs: SILERO_MIN_SPEECH_MS,
     preSpeechPadMs: 160,
     redemptionMs: 900,
-    // onSpeechRealStart: () => {
-    //   if (activePlaybackSources.size > 0) {
-    //     suppressTtsForInterruption();
-    //   }
-    // },
+    onSpeechRealStart: () => {
+      isVadActive = true;
+      // Stop TTS playback immediately (zero latency, local).
+      if (activePlaybackSources.size > 0) {
+        suppressTtsForInterruption();
+      }
+      // Signal to Gemini that a user turn has started.
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'activity_start' }));
+      }
+    },
+    onSpeechEnd: (_audio) => {
+      isVadActive = false;
+      // Signal to Gemini that the user turn has ended.
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'activity_end' }));
+      }
+    },
     onFrameProcessed: (_probabilities, audioFrame) => {
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
       const int16 = float32ToInt16(audioFrame);

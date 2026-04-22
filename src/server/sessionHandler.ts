@@ -95,6 +95,7 @@ export class SessionHandler {
   private resumptionHandle: string | null = null;
   private reconnectAttempts = 0;
   private isReconnecting = false;
+  private isUserActive = false;
   // When true, a deliberate end_session was requested — don't auto-reconnect.
   private intentionalClose = false;
 
@@ -248,6 +249,22 @@ export class SessionHandler {
           if (!this.intentionalClose) {
             this.scheduleReconnect();
           }
+        }
+        break;
+      }
+      case 'activity_start': {
+        this.isUserActive = true;
+        const geminiWs = this.geminiWs;
+        if (geminiWs && geminiWs.readyState === WebSocket.OPEN) {
+          geminiWs.send(JSON.stringify({ realtimeInput: { activityStart: {} } }));
+        }
+        break;
+      }
+      case 'activity_end': {
+        this.isUserActive = false;
+        const geminiWs = this.geminiWs;
+        if (geminiWs && geminiWs.readyState === WebSocket.OPEN) {
+          geminiWs.send(JSON.stringify({ realtimeInput: { activityEnd: {} } }));
         }
         break;
       }
@@ -477,24 +494,8 @@ export class SessionHandler {
 
       const reconnectWithHandle = isReconnect && !!this.resumptionHandle;
 
-      // ── If reconnecting, inject the resumption handle into the setup ──────
-      // GeminiLiveVoice doesn't have a first-class API for this, so we patch
-      // the setup event exactly like we do for audio responses in the factory.
-      if (reconnectWithHandle && this.resumptionHandle) {
-        const handle = this.resumptionHandle;
-        const anyVoice = voice as any;
-        if (typeof anyVoice.sendEvent === 'function') {
-          const originalSendEvent = anyVoice.sendEvent.bind(anyVoice);
-          anyVoice.sendEvent = (type: string, data: any) => {
-            if (type === 'setup' && data?.setup) {
-              // Tell Google: "resume from this handle"
-              this.withSessionResumption(data, handle);
-              console.log(`[${this.sessionId}] Reconnect: injecting resumption handle ${handle.slice(0, 12)}...`);
-            }
-            return originalSendEvent(type, data);
-          };
-        }
-      }
+      // Patch setup event: disable automatic VAD, and inject resumption handle if reconnecting.
+      this.patchSetupEvent(voice, reconnectWithHandle ? (this.resumptionHandle ?? undefined) : undefined);
 
       // ── Audio from Gemini → Browser ────────────────────────────────────────
       voice.on('speaker', (audioStream: NodeJS.ReadableStream) => {
@@ -566,6 +567,17 @@ export class SessionHandler {
 
       // ── Connect ────────────────────────────────────────────────────────────
       await voice.connect();
+
+      // If the user was speaking when this new WS was established (reconnect or
+      // context switch), immediately signal activityStart so Gemini knows a turn
+      // is in progress and doesn't discard the incoming audio.
+      if (this.isUserActive) {
+        const gWs = this.getGeminiWebSocket(voice);
+        if (gWs && gWs.readyState === WebSocket.OPEN) {
+          gWs.send(JSON.stringify({ realtimeInput: { activityStart: {} } }));
+          console.log(`[${this.sessionId}] Restored activityStart on new WS (user was active).`);
+        }
+      }
 
       // ── Capture resumption handles from raw Gemini messages ───────────────
       this.attachGeminiMessageSpy(voice);
@@ -701,6 +713,10 @@ export class SessionHandler {
       });
       const { voice } = createdProfessor;
 
+      // Disable automatic VAD on the new context-switch connection.
+      // (No resumption handle — context switch deliberately starts a fresh session.)
+      this.patchSetupEvent(voice);
+
       // Inject resumption handle if available (preserves audio state).
       // if (this.resumptionHandle) {
       //   const handle = this.resumptionHandle;
@@ -774,6 +790,18 @@ export class SessionHandler {
 
       if (this.ragService) this.attachRagTool(voice);
       await voice.connect();
+
+      // If the user was speaking when this new WS was established (reconnect or
+      // context switch), immediately signal activityStart so Gemini knows a turn
+      // is in progress and doesn't discard the incoming audio.
+      if (this.isUserActive) {
+        const gWs = this.getGeminiWebSocket(voice);
+        if (gWs && gWs.readyState === WebSocket.OPEN) {
+          gWs.send(JSON.stringify({ realtimeInput: { activityStart: {} } }));
+          console.log(`[${this.sessionId}] Restored activityStart on new WS (user was active).`);
+        }
+      }
+
       this.attachGeminiMessageSpy(voice);
 
       // Atomic swap.
@@ -1045,6 +1073,36 @@ export class SessionHandler {
     this.emitTranscriptFromPayload('model', modelPayload);
   }
 
+  /**
+   * Patches the voice instance's sendEvent so that every 'setup' message sent
+   * to Gemini includes:
+   *   - realtimeInputConfig.automaticActivityDetection.disabled = true
+   *   - optionally a session resumption handle
+   */
+  private patchSetupEvent(voice: any, resumptionHandle?: string) {
+    const anyVoice = voice as any;
+    if (typeof anyVoice.sendEvent !== 'function') return;
+
+    const originalSendEvent = anyVoice.sendEvent.bind(anyVoice);
+    anyVoice.sendEvent = (type: string, data: any) => {
+      if (type === 'setup' && data?.setup) {
+        // Disable Gemini's automatic VAD — we drive turns from Silero in the browser.
+        data.setup.realtimeInputConfig = {
+          ...(data.setup.realtimeInputConfig ?? {}),
+          automaticActivityDetection: { disabled: true },
+        };
+        // Inject resumption handle if provided (reconnect path only).
+        if (resumptionHandle) {
+          this.withSessionResumption(data, resumptionHandle);
+          console.log(
+            `[${this.sessionId}] Setup patch: resumption handle injected (${resumptionHandle.slice(0, 12)}...)`,
+          );
+        }
+      }
+      return originalSendEvent(type, data);
+    };
+  }
+
   private withSessionResumption(data: any, handle: string) {
     if (!data?.setup) return;
 
@@ -1164,6 +1222,7 @@ export class SessionHandler {
     this.pendingAudioChunks = [];
     this.isReconnecting = false;
     this.isContextSwitching = false;
+    this.isUserActive = false;
     this.ragService = null;
 
     if (this.contextManager) {

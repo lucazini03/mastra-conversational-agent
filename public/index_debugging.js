@@ -49,6 +49,7 @@ const startBtn = document.getElementById('startBtn');
       let lastTranscriptEntry = null;
       let ttsSuppressionUntilMs = 0;
       let ttsSuppressionDropCount = 0;
+      let isVadActive = false;
 
       // ── Robot animation ──────────────────────────────────────────────────────
       function setRobotSpeaking(speaking) {
@@ -388,6 +389,7 @@ const startBtn = document.getElementById('startBtn');
       }
 
       function stopMicCapture() {
+        isVadActive = false;
         ttsSuppressionUntilMs = 0;
         ttsSuppressionDropCount = 0;
         if (micVad) { void micVad.destroy(); micVad = null; }
@@ -406,11 +408,24 @@ const startBtn = document.getElementById('startBtn');
           preSpeechPadMs: 160,
           redemptionMs: 900,
           onSpeechRealStart: () => {
+            isVadActive = true;
+            // Stop TTS playback immediately (zero latency, local).
             if (activePlaybackSources.size > 0) {
               suppressTtsForInterruption(
                 'silero',
                 'Speech reale rilevato da Silero: riproduzione interrotta.',
               );
+            }
+            // Signal to Gemini that a user turn has started.
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: 'activity_start' }));
+            }
+          },
+          onSpeechEnd: (_audio) => {
+            isVadActive = false;
+            // Signal to Gemini that the user turn has ended.
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: 'activity_end' }));
             }
           },
           onFrameProcessed: (_probabilities, audioFrame) => {
