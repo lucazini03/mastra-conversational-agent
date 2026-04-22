@@ -22,6 +22,7 @@ import {
   DEFAULT_ASSISTANT_ID,
   getAssistantInstructions,
   isAssistantId,
+  PROFESSOR_FILE_CONTEXT_PROMPT,
   PROFESSOR_FREE_ROAM_PROMPT,
   type AssistantId,
 } from '../config/professorConfig.js';
@@ -380,7 +381,9 @@ export class SessionHandler {
     if (this.selectedAssistantId === 'professor' && sessionMode === 'FREE_ROAM') {
       // ── FREE_ROAM MODE: no documents, zero initial latency ─────────────
       // No summary generation call needed — the professor improvises.
-      instructions = PROFESSOR_FREE_ROAM_PROMPT;
+      instructions = FORCE_FULL_FILE_CONTEXT_MODE
+        ? PROFESSOR_FILE_CONTEXT_PROMPT
+        : PROFESSOR_FREE_ROAM_PROMPT;
       initialState = {
         session_mode: 'FREE_ROAM',
         user_language: '',
@@ -488,7 +491,9 @@ export class SessionHandler {
     const basePromptRaw = this.selectedAssistantId === 'professor'
       ? sessionMode === 'RAG'
         ? getAssistantInstructions(this.selectedAssistantId)
-        : PROFESSOR_FREE_ROAM_PROMPT
+        : FORCE_FULL_FILE_CONTEXT_MODE
+          ? PROFESSOR_FILE_CONTEXT_PROMPT
+          : PROFESSOR_FREE_ROAM_PROMPT
       : getAssistantInstructions(this.selectedAssistantId);
     const basePrompt = this.withPersistentFileContext(basePromptRaw);
 
@@ -1449,7 +1454,7 @@ export class SessionHandler {
   switch (assistantId) {
     case 'professor':
       if (FORCE_FULL_FILE_CONTEXT_MODE && this.selectedContextFiles.length > 0) {
-        return `Presentati come professore. Dichiara che userai il documento gia presente nel contesto di sistema e inizia chiedendo solo il nome dello studente.`;
+        return `Presentati e di' per esempio 'cos'abbiamo oggi in programma? Ah, interessante! [argomento del documento]`;
       }
 
       // Check if we have documents (RAG mode) or not (FREE_ROAM mode).
