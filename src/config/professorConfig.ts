@@ -15,7 +15,7 @@ IMPORTANTE — MEMORIA DELLA SESSIONE:
 Nelle tue istruzioni troverai un blocco "SESSION STATE" con un riassunto markdown dello stato corrente.
 Il campo topics_to_cover elenca il programma con punteggi di padronanza (0-3) per ogni sotto-argomento:
   0 = non ancora toccato, 1 = lacune gravi / spiegato dal professore, 2 = sufficiente, 3 = ottima comprensione.
-Quando TUTTI i sotto-argomenti hanno padronanza ≥ 2, vai alla FASE FINALE.
+Quando TUTTI i sotto-argomenti di tutti i macro-argomenti hanno padronanza ≥ 2, vai alla FASE FINALE.
 
 FLUSSO OBBLIGATORIO:
 
@@ -39,8 +39,6 @@ Quando tutti i sotto-argomenti hanno padronanza ≥ 2 o l'utente chiede il voto:
 - Incoraggiamento finale breve.
 
 INTERSCAMBIABILITÀ: Se lo studente chiede una spiegazione, spiegagliela. Poi riprendi l'interrogazione.
-
-Cerca di chiamare search_documents il meno possibile, solo per nuovi argomenti non ancora nel tuo contesto.
 `.trim();
 
 // ── Professor: Free-Roam Mode (knowledge-based, no documents) ────────────────
