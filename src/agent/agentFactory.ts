@@ -1,4 +1,4 @@
-// src/agent/professorFactory.ts
+// src/agent/agentFactory.ts
 //
 // WHY A FACTORY instead of a singleton?
 // GeminiLiveVoice holds a stateful WebSocket to Google's Live API.
@@ -8,9 +8,9 @@
 
 import { Agent } from '@mastra/core/agent';
 import { GeminiLiveVoice } from '@mastra/voice-google-gemini-live';
-import { PROFESSOR_INSTRUCTIONS, VOICE_CONFIG } from '../config/professorConfig.js';
+import { INTERVIEW_COACH_INSTRUCTIONS, VOICE_CONFIG } from '../config/interviewConfig.js';
 
-type CreateProfessorAgentOptions = {
+type CreateInterviewAgentOptions = {
   instructions?: string;
   name?: string;
 };
@@ -52,7 +52,7 @@ function patchSetupForAudioResponses(voice: GeminiLiveVoice, speaker: string) {
   anyVoice.__audioSetupPatched = true;
 }
 
-export interface ProfessorAgent {
+export interface InterviewAgent {
   agent: Agent;
   voice: GeminiLiveVoice;
   /** Call this when the user disconnects to free the Google Live API session */
@@ -97,17 +97,17 @@ function silenceAudioDebugLogs() {
 silenceAudioDebugLogs();
 
 /**
- * Creates a fully isolated professor agent for one user session.
+ * Creates a fully isolated interview coach agent for one user session.
  * Call once per incoming WebSocket connection; call destroy() on disconnect.
  */
-export function createProfessorAgent(options: CreateProfessorAgentOptions = {}): ProfessorAgent {
+export function createInterviewAgent(options: CreateInterviewAgentOptions = {}): InterviewAgent {
   const apiKey = process.env.GEMINI_LIVE_API_KEY;
   if (!apiKey) {
     throw new Error('GEMINI_LIVE_API_KEY is required. Copy .env.example to .env and fill it in.');
   }
 
-  const instructions = options.instructions ?? PROFESSOR_INSTRUCTIONS;
-  const name = options.name ?? 'MemorAIz Assistant';
+  const instructions = options.instructions ?? INTERVIEW_COACH_INSTRUCTIONS;
+  const name = options.name ?? 'MemorAIz Interview Coach';
 
   const liveModel = (process.env.GEMINI_LIVE_MODEL ?? VOICE_CONFIG.model)
     .replace(/^models\//, '') as any;
@@ -124,7 +124,7 @@ export function createProfessorAgent(options: CreateProfessorAgentOptions = {}):
   patchSetupForAudioResponses(voice, VOICE_CONFIG.speaker);
 
   const agent = new Agent({
-    id: 'professor-agent',
+    id: 'interview-coach-agent',
     name,
     instructions,
     // The model field here is the TEXT fallback for agent.generate() calls.

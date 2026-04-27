@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>MemorAIz | H-Farm Oral Exam Demo</title>
+    <title>MemorAIz | Job Interview Coach</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet" />
@@ -15,10 +15,10 @@
 
     <main class="demo-shell">
       <header class="hero">
-        <p class="kicker">MemorAIz x H-Farm</p>
-        <h1>Esame orale simulato con l'assistente del professore</h1>
+        <p class="kicker">MemorAIz</p>
+        <h1>Job Interview Coach</h1>
         <p class="lead">
-          Un'esperienza vocale in tempo reale, progettata per studenti universitari.
+          A real-time voice interview experience to help you prepare for your next job opportunity.
         </p>
       </header>
 
@@ -32,12 +32,12 @@
               </svg>
             </div>
             <div>
-              <p class="identity-label">Persona attiva</p>
-              <p class="identity-title">Assistente del Professore</p>
+              <p class="identity-label">Active persona</p>
+              <p class="identity-title">Interview Coach</p>
             </div>
           </div>
 
-          <div class="timer-chip" aria-label="Durata sessione">
+          <div class="timer-chip" aria-label="Session duration">
             <span>Sessione</span>
             <strong id="conversationTimer">00:00</strong>
           </div>
@@ -76,28 +76,40 @@
           </div>
         </div>
 
-        <p class="status" id="status">Pronto</p>
-        <p class="hint" id="sessionHint">Carica il documento di contesto, poi premi <strong>Avvia Sessione</strong> per iniziare l'esame orale.</p>
+        <p class="status" id="status">Ready</p>
+        <p class="hint" id="sessionHint">Upload a job description, then press <strong>Start Session</strong> to begin the interview.</p>
 
         <div class="doc-grid">
           <label class="doc-field" for="contextDocInput">
-            <span>Documento di contesto</span>
-            <p class="doc-field-desc">PDF, TXT o Markdown. Il contenuto completo viene iniettato nel contesto persistente dell'assistente per tutta la sessione.</p>
-            <div class="doc-field-btn">&#8593;&nbsp; Scegli file</div>
-            <p class="doc-field-filename" id="contextDocName">Nessun file selezionato</p>
+            <span>Job Description</span>
+            <p class="doc-field-desc">PDF, TXT or Markdown. The content is injected into the coach's context for the entire session.</p>
+            <div class="doc-field-btn">&#8593;&nbsp; Choose file</div>
+            <p class="doc-field-filename" id="contextDocName">No file selected</p>
             <input id="contextDocInput" type="file" accept=".pdf,.txt,.md,.markdown,.text" />
           </label>
         </div>
 
         <div class="actions">
-          <button id="startBtn" class="btn btn-primary">Avvia Sessione</button>
-          <button id="stopBtn" class="btn btn-danger" disabled>Termina</button>
+          <button id="startBtn" class="btn btn-primary">Start Session</button>
+          <button id="stopBtn" class="btn btn-danger" disabled>End</button>
         </div>
       </section>
     </main>
 
+    <div id="feedbackOverlay" class="feedback-overlay" style="display:none">
+      <div class="feedback-panel">
+        <h2>Interview Feedback</h2>
+        <div id="feedbackContent"></div>
+        <div class="feedback-actions">
+          <button id="feedbackCopyBtn" class="btn btn-primary">Copy to Clipboard</button>
+          <button id="feedbackCloseBtn" class="btn btn-danger">Close</button>
+        </div>
+      </div>
+    </div>
+
     <script src="/ort.min.js"></script>
     <script src="/vad.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script src="/index.js"></script>
   </body>
 </html>

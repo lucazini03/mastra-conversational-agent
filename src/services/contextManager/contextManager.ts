@@ -17,8 +17,8 @@
 import { EventEmitter } from 'events';
 import { generateObject } from 'ai';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
-import type { AssistantId } from '../../config/professorConfig.js';
-import { getSchemaForAssistant, type AnyAssistantState, type SessionMode } from './schemas.js';
+import type { AssistantId } from '../../config/interviewConfig.js';
+import { getSchemaForAssistant, type AnyAssistantState } from './schemas.js';
 
 // ── Environment-driven configuration ────────────────────────────────────────
 
@@ -72,8 +72,6 @@ export class ContextManager extends EventEmitter<ContextManagerEvents> {
   private sessionId: string;
   private assistantId: AssistantId;
   private baseSystemPrompt: string;
-  /** Professor-only: RAG (document-based) or FREE_ROAM (knowledge-based). */
-  private sessionMode: SessionMode | undefined;
 
   // ── Transcript tracking ──────────────────────────────────────────────────
   private transcript: TranscriptEntry[] = [];
@@ -106,14 +104,11 @@ export class ContextManager extends EventEmitter<ContextManagerEvents> {
     sessionId: string;
     assistantId: AssistantId;
     baseSystemPrompt: string;
-    /** Professor-only: determines extraction strategy and markdown format. */
-    sessionMode?: SessionMode;
   }) {
     super();
     this.sessionId = opts.sessionId;
     this.assistantId = opts.assistantId;
     this.baseSystemPrompt = opts.baseSystemPrompt;
-    this.sessionMode = opts.sessionMode;
   }
 
   // ── Public API ───────────────────────────────────────────────────────────
@@ -321,17 +316,11 @@ export class ContextManager extends EventEmitter<ContextManagerEvents> {
     this.lastExtractionTurnIndex = lastTurnIndex;
     this.extractionSucceeded = true;
 
-    // ── Debug logging: JSON state + markdown summary (if professor) ───────
-    console.log(
-      `[${this.sessionId}] ContextManager: extraction succeeded [mode=${this.sessionMode ?? 'generic'}]. Extracted JSON state:`,
-    );
+    console.log(`[${this.sessionId}] ContextManager: extraction succeeded. Extracted JSON state:`);
     console.log(JSON.stringify(this.currentState, null, 2));
-
-    if (this.assistantId === 'professor' && this.sessionMode) {
-      const markdown = generateMarkdownSummary(this.currentState, this.sessionMode);
-      console.log(`[${this.sessionId}] ContextManager: corresponding Markdown summary:`);
-      console.log(markdown);
-    }
+    const markdown = generateMarkdownSummary(this.currentState);
+    console.log(`[${this.sessionId}] ContextManager: corresponding Markdown summary:`);
+    console.log(markdown);
 
     this.emit('extractionDone', true);
     this.extractionInProgress = false;
@@ -374,8 +363,8 @@ export class ContextManager extends EventEmitter<ContextManagerEvents> {
       `5. Your next action must be a DIRECT CONTINUATION — respond to the user's last message or wait quietly for their input.`,
     );
 
-    // 3. Session state — compact markdown for professor
-    const markdown = generateMarkdownSummary(state, this.sessionMode ?? 'FREE_ROAM');
+    // 3. Session state — compact markdown
+    const markdown = generateMarkdownSummary(state);
     sections.push(`\n---\n${markdown}`);
 
     // 4. Recent conversation transcript (structured turns + anti-repetition)
@@ -425,103 +414,34 @@ export class ContextManager extends EventEmitter<ContextManagerEvents> {
   }
   // ── Extraction prompt builders ─────────────────────────────────────────
 
-  /** Builds the extraction prompt for the professor mode in this branch. */
   private buildExtractionPrompt(existingStateJSON: string, deltaText: string): string {
-    const header = `You are a memory extraction engine for a voice conversation. You receive the current JSON state and a new transcript delta. You must output the updated state.
+    return `You are a memory extraction engine for a job interview voice session. You receive the current JSON state and a new transcript delta. You must output the updated state.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 CURRENT STATE:
 ${existingStateJSON}
 
-NEW TRANSCRIPT DELTA (roles: [model] = assistant/professor, [user] = student/visitor):
+NEW TRANSCRIPT DELTA (roles: [model] = interviewer, [user] = candidate):
 ${deltaText}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
 
-    // ── Professor RAG: update mastery scores on fixed syllabus ────────────
-    if (this.sessionMode === 'RAG') {
-      return `${header}
+RULE 1 — questions_asked: TRACK EVERY QUESTION
+For each question the interviewer ([model]) asked in this delta, append a new entry to questions_asked with:
+- question: the exact question text
+- answer_summary: a 2-3 sentence summary of the candidate's response
+- phase: the current interview phase name
+Do NOT remove existing entries.
 
-═══════════════════════════════════════════════════════
-RULE 1 — topics_to_cover: UPDATE MASTERY SCORES (never add/remove items)
-═══════════════════════════════════════════════════════
-This is a FIXED syllabus. NEVER add or remove items from topics_to_cover.
-For each subtopic mentioned by the professor ([model]) in the transcript delta, update its mastery_score:
-  3 = student answered correctly without help
-  2 = student answered partially or with hints
-  1 = student didn't know / professor had to explain
-  0 = not yet discussed (keep current score — don't reset to 0)
+RULE 2 — current_phase
+If the interviewer moved to a new phase, update current_phase to the new phase name.
 
-CRITICAL: Only update scores for subtopics explicitly discussed. Leave untouched subtopics at their current score.
+RULE 3 — candidate_info
+Update name if the candidate introduced themselves. Update background if new info about their experience or education emerged.
 
-═══════════════════════════════════════════════════════
-RULE 2 — OTHER FIELDS
-═══════════════════════════════════════════════════════
-- KEEP session_mode unchanged (always "RAG").
-- UPDATE current_topic if the professor moved to a new main topic.
-- APPEND to behavioral_directives for new user preferences.
-- UPDATE student_info if new data appears.
-- UPDATE overall_evaluation to reflect progress.
-- covered_concepts: leave empty (not used in RAG mode).
-- Be concise: short phrases, not full sentences.`;
-    }
+RULE 4 — overall_impression
+Update to reflect the latest assessment of the candidate's performance.
 
-    // ── Professor FREE_ROAM: track new concepts on-the-fly ───────────────
-    if (this.sessionMode === 'FREE_ROAM') {
-      return `${header}
-
-═══════════════════════════════════════════════════════
-RULE 1 — current_topic
-═══════════════════════════════════════════════════════
-If the user changed the subject in this delta, update current_topic to the new subject.
-
-═══════════════════════════════════════════════════════
-RULE 2 — covered_concepts: TRACK NEW CONCEPTS
-═══════════════════════════════════════════════════════
-Identify specific concepts the professor ([model]) discussed or asked about in this delta.
-Summarize each into 2-3 words (e.g. "Berlin Wall", "Dark Phase", "Legge di Ohm").
-Add new concepts to covered_concepts with a mastery_score:
-  3 = student answered correctly without help
-  2 = student answered partially or with hints
-  1 = student didn't know / professor had to explain
-Do NOT duplicate concepts already in the list. If a concept was re-discussed, update its score.
-
-═══════════════════════════════════════════════════════
-RULE 3 — OTHER FIELDS
-═══════════════════════════════════════════════════════
-- KEEP session_mode unchanged (always "FREE_ROAM").
-- topics_to_cover: leave empty (not used in FREE_ROAM mode).
-- APPEND to behavioral_directives for new user preferences.
-- UPDATE student_info if new data appears.
-- UPDATE overall_evaluation to reflect progress.
-- Be concise: short phrases, not full sentences.`;
-    }
-
-    return `${header}
-
-═══════════════════════════════════════════════════════
-RULE 1 — current_topic
-═══════════════════════════════════════════════════════
-If the user changed the subject in this delta, update current_topic to the new subject.
-
-═══════════════════════════════════════════════════════
-RULE 2 — covered_concepts: TRACK NEW CONCEPTS
-═══════════════════════════════════════════════════════
-Identify specific concepts the professor ([model]) discussed or asked about in this delta.
-Summarize each into 2-3 words.
-Add new concepts to covered_concepts with a mastery_score:
-  3 = student answered correctly without help
-  2 = student answered partially or with hints
-  1 = student didn't know / professor had to explain
-Do NOT duplicate concepts already in the list. If a concept was re-discussed, update its score.
-
-═══════════════════════════════════════════════════════
-RULE 3 — OTHER FIELDS
-═══════════════════════════════════════════════════════
-- KEEP session_mode unchanged (always "FREE_ROAM").
-- topics_to_cover: leave empty (not used in FREE_ROAM mode).
-- APPEND to behavioral_directives for new user preferences.
-- UPDATE student_info if new data appears.
-- UPDATE overall_evaluation to reflect progress.
+RULE 5 — OTHER FIELDS
+- APPEND to behavioral_directives for new preferences or observations.
+- UPDATE user_language if the candidate switched language.
 - Be concise: short phrases, not full sentences.`;
   }
 
@@ -538,15 +458,13 @@ RULE 3 — OTHER FIELDS
     const payload = this.buildInjectionPayload();
     if (!payload) return;
 
-    // ── Debug logging: show both JSON state and markdown summary ──────────
     console.log(
       `[${this.sessionId}] ContextManager: emitting switchReady at turnComplete. Buffer lines: ${this.unprocessedBuffer.length}`,
     );
     console.log(`[${this.sessionId}] ── Extracted JSON state:`);
     console.log(JSON.stringify(this.currentState, null, 2));
-
-    if (this.sessionMode && this.currentState) {
-      const markdown = generateMarkdownSummary(this.currentState, this.sessionMode);
+    if (this.currentState) {
+      const markdown = generateMarkdownSummary(this.currentState);
       console.log(`[${this.sessionId}] ── Produced Markdown summary:`);
       console.log(markdown);
     }
@@ -557,81 +475,45 @@ RULE 3 — OTHER FIELDS
 
 // ── Markdown Summary Generator (module-level, reusable) ──────────────────────
 //
-// Converts the professor's JSON state into a compact markdown checklist for
-// injection into the Gemini Live system prompt. Reduces token overhead by ~70%
-// compared to raw JSON.
+// Converts the interview coach JSON state into compact markdown for injection
+// into the Gemini Live system prompt on context switches.
 //
 // Exported so sessionHandler can also use it for the initial state injection.
 
-/**
- * Mastery score → checkbox character:
- *   [ ] = 0 (untouched)
- *   [!] = 1 (gaps / professor explained)
- *   [x] = 2+ (sufficient or strong)
- */
-function masteryCheckbox(score: number): string {
-  if (score === 0) return '[ ]';
-  if (score === 1) return '[!]';
-  return '[x]';
-}
-
-export function generateMarkdownSummary(state: AnyAssistantState, mode: SessionMode): string {
-  const s = state as any; // We know the shape from professorStateSchema
+export function generateMarkdownSummary(state: AnyAssistantState): string {
+  const s = state;
   const lines: string[] = [];
 
-  // ── Header ─────────────────────────────────────────────────────────────
-  lines.push(`## SESSION STATE (${mode === 'RAG' ? 'RAG Mode' : 'Free Roam'})`);
+  lines.push('## SESSION STATE (Interview Coach)');
   lines.push('');
 
-  // ── Student info ───────────────────────────────────────────────────────
-  const name = s.student_info?.name || '(non fornito)';
-  const level = s.student_info?.education_level || '(non fornito)';
-  lines.push(`**Student:** ${name} (${level})`);
+  const name = s.candidate_info?.name || '(not provided)';
+  const background = s.candidate_info?.background || '(not yet assessed)';
+  lines.push(`**Candidate:** ${name}`);
+  lines.push(`**Background:** ${background}`);
 
-  // ── Current topic (always shown, most relevant for FREE_ROAM) ──────────
-  if (s.current_topic) {
-    lines.push(`**Current Topic:** ${s.current_topic}`);
+  if (s.current_phase) {
+    lines.push(`**Current Phase:** ${s.current_phase}`);
   }
 
-  // ── Evaluation ─────────────────────────────────────────────────────────
-  if (s.overall_evaluation) {
-    lines.push(`**Evaluation:** ${s.overall_evaluation}`);
+  if (s.overall_impression) {
+    lines.push(`**Overall Impression:** ${s.overall_impression}`);
   }
   lines.push('');
 
-  // ── RAG mode: syllabus progress ────────────────────────────────────────
-  if (mode === 'RAG' && Array.isArray(s.topics_to_cover) && s.topics_to_cover.length > 0) {
-    lines.push('### Syllabus Progress');
-    for (const topic of s.topics_to_cover) {
-      lines.push(`#### ${topic.main_topic}`);
-      if (Array.isArray(topic.subtopics)) {
-        for (const sub of topic.subtopics) {
-          lines.push(`- ${masteryCheckbox(sub.mastery_score)} ${sub.name} (${sub.mastery_score}/3)`);
-        }
-      }
+  if (Array.isArray(s.questions_asked) && s.questions_asked.length > 0) {
+    lines.push('### Questions Asked');
+    for (const q of s.questions_asked) {
+      lines.push(`- [${q.phase}] Q: ${q.question}`);
+      lines.push(`  A: ${q.answer_summary}`);
     }
     lines.push('');
   }
 
-  // ── FREE_ROAM mode: covered concepts ───────────────────────────────────
-  if (mode === 'FREE_ROAM' && Array.isArray(s.covered_concepts) && s.covered_concepts.length > 0) {
-    lines.push('### Covered Concepts');
-    for (const c of s.covered_concepts) {
-      lines.push(`- ${masteryCheckbox(c.mastery_score)} ${c.concept} (${c.mastery_score}/3)`);
-    }
-    lines.push('');
-  } else if (mode === 'FREE_ROAM') {
-    lines.push('### Covered Concepts');
-    lines.push('(none yet)');
-    lines.push('');
-  }
-
-  // ── Behavioural directives ─────────────────────────────────────────────
   if (Array.isArray(s.behavioral_directives) && s.behavioral_directives.length > 0) {
     lines.push(`**Directives:** ${s.behavioral_directives.join('; ')}`);
   }
 
-  // ── Language ───────────────────────────────────────────────────────────
   if (s.user_language) {
     lines.push(`**Language:** ${s.user_language}`);
   }

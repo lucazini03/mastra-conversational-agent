@@ -267,7 +267,7 @@ const startBtn = document.getElementById('startBtn');
         const contextFile = contextDocInput?.files?.[0] ?? null;
 
         if (!contextFile) {
-          throw new Error('Seleziona un documento prima di avviare la sessione.');
+              throw new Error('Please upload a job description before starting the session.');
         }
 
         const formData = new FormData();
@@ -297,7 +297,7 @@ const startBtn = document.getElementById('startBtn');
       }
 
       function getSelectedAssistantLabel() {
-        return 'Il Professore';
+        return 'Interview Coach';
       }
 
       // ── Audio helpers ─────────────────────────────────────────────────────────
@@ -579,15 +579,15 @@ const startBtn = document.getElementById('startBtn');
                 logSystem('Session started.', '');
                 setStatus('Connected', 'connected');
               } else {
-                setStatus('Connesso', 'connected');
-                setHint("L'assistente del professore è pronto. Puoi iniziare a rispondere alle domande o porre chiarimenti.");
+                setStatus('Connected', 'connected');
+                setHint('The Interview Coach is ready. You can start speaking whenever you are ready.');
               }
               startConnectionTimer();
-            } else if (txt.includes('Connessione ripristinata')) {
+            } else if (txt.includes('Connection restored')) {
               startConnectionTimer();
-              setStatus(hasDebugUi ? txt : 'Connesso', 'connected');
+              setStatus(hasDebugUi ? txt : 'Connected', 'connected');
               if (!hasDebugUi) {
-                setHint('Connessione WebSocket ripristinata correttamente — la sessione riprende normalmente.');
+                setHint('WebSocket connection restored — session continues normally.');
               }
             } else {
               setStatus(txt, txt.toLowerCase().includes('error') ? 'error' : '');
@@ -599,16 +599,16 @@ const startBtn = document.getElementById('startBtn');
               setStatus('Connection failed.', 'error');
               logSystem(`Error: ${msg.message}`, 'error');
             } else {
-              setStatus('Errore', 'error');
-              setHint(`Sessione non disponibile: ${msg.message ?? 'errore sconosciuto'}`);
+              setStatus('Error', 'error');
+              setHint(`Session unavailable: ${msg.message ?? 'unknown error'}`);
             }
             stopSession();
           }
 
           if (msg.type === 'transcript') {
             logTranscript(msg.role, msg.text);
-            if (msg.role === 'model') setStatus(hasDebugUi ? 'Speaking...' : 'Sta parlando', 'speaking');
-            if (msg.role === 'user') setStatus(hasDebugUi ? 'Listening...' : 'Ti ascolta', 'connected');
+            if (msg.role === 'model') setStatus(hasDebugUi ? 'Speaking...' : 'Speaking', 'speaking');
+            if (msg.role === 'user') setStatus(hasDebugUi ? 'Listening...' : 'Listening', 'connected');
           }
 
           if (msg.type === 'rag_tool_called') {
@@ -635,14 +635,26 @@ const startBtn = document.getElementById('startBtn');
               );
               setStatus(hasPricing ? `Session cost: ${totalCost}` : 'Session ended.', '');
             } else {
-              setHint(`Sessione terminata. Costo stimato per questa conversazione: ${hasPricing ? totalCost : 'non configurata'}. Puoi ricaricare i documenti e avviare una nuova sessione.`);
-              setStatus('Pronto', '');
+              setHint(`Session ended. Estimated cost: ${hasPricing ? totalCost : 'not configured'}. You can upload a new job description and start a new session.`);
+              setStatus('Ready', '');
             }
+          }
+
+          if (msg.type === 'interview_feedback') {
+            const markdown = String(msg.markdown ?? '');
+            const contentEl = document.getElementById('feedbackContent');
+            const overlay = document.getElementById('feedbackOverlay');
+            if (contentEl && window.marked) {
+              contentEl.innerHTML = window.marked.parse(markdown);
+            } else if (contentEl) {
+              contentEl.textContent = markdown;
+            }
+            if (overlay) overlay.style.display = 'flex';
           }
 
           if (msg.type === 'vad_event') {
             const source = String(msg.source ?? 'gemini').toLowerCase();
-            const detail = String(msg.message ?? 'Evento VAD rilevato lato modello.');
+            const detail = String(msg.message ?? 'VAD event detected by model.');
             if (source === 'gemini') {
               suppressTtsForInterruption('gemini', detail, 1200);
             } else {
@@ -659,8 +671,8 @@ const startBtn = document.getElementById('startBtn');
           if (hasDebugUi) {
             logSystem('WebSocket error.', 'error');
           } else {
-            setStatus('Errore', 'error');
-            setHint('Errore di connessione WebSocket. Controlla che il server sia attivo e riprova.');
+            setStatus('Error', 'error');
+            setHint('WebSocket connection error. Make sure the server is running and try again.');
           }
         };
 
@@ -676,11 +688,11 @@ const startBtn = document.getElementById('startBtn');
           setDisabled(stopBtn, true);
           setDisabled(testBtn, true);
           setDocumentInputsDisabled(false);
-          setStatus(hasDebugUi ? 'Idle' : 'Pronto', '');
+          setStatus(hasDebugUi ? 'Idle' : 'Ready', '');
           if (hasDebugUi) {
             logSystem('Session ended.');
           } else {
-            setHint('Sessione terminata. Puoi caricare nuovi documenti e avviare una nuova sessione quando vuoi.');
+            setHint('Session ended. You can upload a new job description and start a new session.');
           }
         };
       }
@@ -689,7 +701,7 @@ const startBtn = document.getElementById('startBtn');
         if (!ws) return;
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: 'end_session' }));
-          ws.close();
+          // Don't close immediately — let server send feedback first, then it will close.
         } else { ws = null; }
         stopMicCapture();
       }
@@ -703,7 +715,17 @@ const startBtn = document.getElementById('startBtn');
       contextDocInput?.addEventListener('change', () => {
         const file = contextDocInput.files?.[0];
         if (!contextDocName) return;
-        contextDocName.textContent = file ? file.name : 'Nessun file selezionato';
+        contextDocName.textContent = file ? file.name : 'No file selected';
         contextDocName.classList.toggle('visible', Boolean(file));
+      });
+
+      document.getElementById('feedbackCloseBtn')?.addEventListener('click', () => {
+        const overlay = document.getElementById('feedbackOverlay');
+        if (overlay) overlay.style.display = 'none';
+      });
+
+      document.getElementById('feedbackCopyBtn')?.addEventListener('click', () => {
+        const content = document.getElementById('feedbackContent');
+        if (content) navigator.clipboard.writeText(content.innerText ?? '').catch(() => {});
       });
     

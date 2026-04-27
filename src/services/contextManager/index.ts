@@ -6,5 +6,4 @@ export {
   ASSISTANT_STATE_SCHEMAS,
   type AssistantState,
   type AnyAssistantState,
-  type SessionMode,
 } from './schemas.js';

@@ -11,14 +11,14 @@ import 'dotenv/config';
 import { PassThrough } from 'node:stream';
 import chalk from 'chalk';
 import { getMicrophoneStream, playAudio } from '@mastra/node-audio';
-import { createProfessorAgent } from '../agent/agentFactory.js';
+import { createInterviewAgent } from '../agent/agentFactory.js';
 
 console.log(chalk.yellow('\n  MemorAIz assistant — CLI Test Mode'));
 console.log(chalk.yellow('  ─────────────────────────────'));
 console.log(chalk.gray('  Speak into your microphone. Press Ctrl+C to quit.\n'));
 
 async function main() {
-  const { voice, destroy } = createProfessorAgent();
+  const { voice, destroy } = createInterviewAgent();
 
   // ── Wire up audio playback from Gemini ───────────────────────────────────
   // Gemini may emit many short speaker streams. Playing each one separately

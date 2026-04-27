@@ -36,6 +36,19 @@ export const DocumentIndexSchema = z.object({
 
 export type DocumentIndex = z.infer<typeof DocumentIndexSchema>;
 
+export const InterviewStructureSchema = z.object({
+  role_title: z.string().describe('The exact job title from the job description.'),
+  company_name: z.string().describe('Company name extracted from the job description, or empty string if not found.'),
+  culture_notes: z.string().describe('Brief notes on company culture, values, or team dynamics mentioned in the JD.'),
+  phases: z.array(z.object({
+    phase_name: z.string().describe('Name of this interview phase (e.g. "Introduction", "Technical Deep-Dive", "Behavioural", "Closing").'),
+    question_seeds: z.array(z.string()).describe('3-5 representative questions to ask in this phase, grounded in the JD.'),
+    evaluation_criteria: z.array(z.string()).describe('2-3 criteria to assess the candidate on in this phase.'),
+  })).describe('Ordered interview phases covering the full conversation flow.'),
+});
+
+export type InterviewStructure = z.infer<typeof InterviewStructureSchema>;
+
 export type DocsContent = {
   /** SHA-256 of the combined, normalised text of all PDFs. */
   hash: string;
@@ -48,6 +61,11 @@ export type DocsContent = {
 export type SummaryResult = {
   index: DocumentIndex | null;
   /** Non-null only when generation ran (not served from disk cache). */
+  generationTokens: { input: number; output: number } | null;
+};
+
+export type InterviewStructureResult = {
+  structure: InterviewStructure | null;
   generationTokens: { input: number; output: number } | null;
 };
 
@@ -181,6 +199,71 @@ class DocumentService {
         err instanceof Error ? err.message : String(err),
       );
       return { index: null, generationTokens: null };
+    }
+  }
+  /**
+   * Generates (and caches) a structured interview plan for the given job
+   * description text. Results are cached by content hash so repeated calls
+   * within the same or future process lifetimes are instant.
+   */
+  async generateInterviewStructure(text: string): Promise<InterviewStructureResult> {
+    if (!text.trim()) return { structure: null, generationTokens: null };
+
+    const hash = createHash('sha256').update(text).digest('hex');
+    await fs.mkdir(SUMMARIES_DIR, { recursive: true });
+    const cacheFile = path.join(SUMMARIES_DIR, `${hash}_job_description.json`);
+
+    try {
+      const raw = await fs.readFile(cacheFile, 'utf-8');
+      const parsed = InterviewStructureSchema.safeParse(JSON.parse(raw));
+      if (parsed.success) {
+        console.log(`[DocumentService] Interview structure cache hit (hash ${hash.slice(0, 12)}...)`);
+        return { structure: parsed.data, generationTokens: null };
+      }
+    } catch {
+      // File absent or corrupt — fall through to generation.
+    }
+
+    console.log(`[DocumentService] Generating interview structure (hash ${hash.slice(0, 12)}...)...`);
+    try {
+      const google = this.getGoogleClient();
+      const model = google('gemini-3.1-flash-lite-preview');
+
+      const { object, usage } = await generateObject({
+        model,
+        schema: InterviewStructureSchema,
+        prompt: [
+          'You are an expert HR manager and senior technical interviewer.',
+          'Read the job description below and produce a realistic, detailed interview plan.',
+          '',
+          'REQUIRED STRUCTURE — always include these phases in this order:',
+          '1. Introduction — the interviewer asks the candidate to introduce themselves, describe their career path, and explain their motivation for this specific role and company. Include 3-4 question seeds probing background, career trajectory, self-assessment, and motivation.',
+          '2. 2-4 role-specific phases drawn directly from the skills, responsibilities, and values in the JD (e.g. Technical Proficiency, Problem Solving, Leadership, Domain Knowledge, Behavioural/Situational). For each phase include 4-5 specific question seeds grounded in the JD — not generic questions.',
+          '3. Closing — the interviewer wraps up and invites the candidate to ask questions. Include 1-2 question seeds the interviewer can use to close naturally.',
+          '',
+          'RULES:',
+          '- Every question seed must be specific and traceable to a concrete skill, responsibility, or value mentioned in the JD.',
+          '- Avoid generic interview questions ("where do you see yourself in 5 years?"). Ground everything in the JD.',
+          '- Evaluation criteria should be concrete and measurable, not generic.',
+          '- The Introduction phase must always ask about background, motivation, and fit — the interviewer does NOT ask what role the candidate is applying for (they already know).',
+          '',
+          'JOB DESCRIPTION:',
+          text,
+        ].join('\n'),
+      });
+
+      await fs.writeFile(cacheFile, JSON.stringify(object, null, 2), 'utf-8');
+      console.log(`[DocumentService] Interview structure saved to ${cacheFile}`);
+      return {
+        structure: object,
+        generationTokens: { input: usage.inputTokens ?? 0, output: usage.outputTokens ?? 0 },
+      };
+    } catch (err) {
+      console.error(
+        '[DocumentService] Interview structure generation failed:',
+        err instanceof Error ? err.message : String(err),
+      );
+      return { structure: null, generationTokens: null };
     }
   }
 }

@@ -532,3 +532,50 @@ body {
   padding-bottom: 4px;
   border-bottom: 1px solid rgba(124, 249, 204, 0.08);
 }
+
+/* Feedback overlay */
+.feedback-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(4, 10, 22, 0.88);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: 24px;
+}
+
+.feedback-panel {
+  background: #0d1b33;
+  border: 1px solid rgba(124, 249, 204, 0.25);
+  border-radius: 16px;
+  padding: 32px;
+  max-width: 720px;
+  width: 100%;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+.feedback-panel h2 {
+  margin: 0 0 20px;
+  font-size: 1.4rem;
+  color: #7cf9cc;
+}
+
+#feedbackContent {
+  color: #d4eaf7;
+  line-height: 1.7;
+  font-size: 0.95rem;
+}
+
+#feedbackContent h1, #feedbackContent h2, #feedbackContent h3 {
+  color: #7cf9cc;
+  margin-top: 1.2em;
+}
+
+.feedback-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 24px;
+  justify-content: flex-end;
+}

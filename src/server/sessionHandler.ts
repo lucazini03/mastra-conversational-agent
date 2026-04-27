@@ -1,7 +1,7 @@
 // src/server/sessionHandler.ts
 //
 // One instance of this class is created per browser WebSocket connection.
-// It owns a ProfessorAgent and pipes audio in both directions:
+// It owns an InterviewAgent and pipes audio in both directions:
 //   Browser mic PCM → GeminiLive → Browser speaker PCM
 //
 // Protocol (all text frames, JSON):
@@ -14,17 +14,19 @@
 //   Server  → Browser { type: 'status',     message: string }
 //   Server  → Browser { type: 'error',      message: string }
 //   Server  → Browser { type: 'tts_audio',  data: string }    ← base64 Int16 PCM, 24kHz mono
+//   Server  → Browser { type: 'interview_feedback', markdown: string }
 
 import { WebSocket, type RawData } from 'ws';
 import { rm } from 'node:fs/promises';
-import { createProfessorAgent, type ProfessorAgent } from '../agent/agentFactory.js';
+import { generateText } from 'ai';
+import { createGoogleGenerativeAI } from '@ai-sdk/google';
+import { createInterviewAgent, type InterviewAgent } from '../agent/agentFactory.js';
 import {
   DEFAULT_ASSISTANT_ID,
-  PROFESSOR_FILE_CONTEXT_PROMPT,
+  INTERVIEW_COACH_PROMPT,
   type AssistantId,
-} from '../config/professorConfig.js';
-import { BrowserRagService } from './ragService.js';
-import { documentService } from './documentService.js';
+} from '../config/interviewConfig.js';
+import { documentService, type InterviewStructure } from './documentService.js';
 import { SessionCostTracker } from './sessionCostTracker.js';
 import { SessionLogger } from './sessionLogger.js';
 import {
@@ -32,27 +34,13 @@ import {
   generateMarkdownSummary,
   type InjectionPayload,
   type AnyAssistantState,
-  type SessionMode,
 } from '../services/contextManager/index.js';
 import { appendSessionToLog } from './usageTracker.js';
 import type { UploadedDocumentConfig } from './documentConfigStore.js';
 
-// How long to wait before attempting a reconnect after Google drops the line.
-// Keep this short (1-2 s) so the user barely notices the gap.
 const RECONNECT_DELAY_MS = 1500;
 
-// Maximum number of consecutive reconnect attempts before giving up and
-// reporting an error to the browser. Prevents infinite loops on hard failures.
 const MAX_RECONNECT_ATTEMPTS = 5;
-
-// Demo branch mode: always bypass RAG retrieval and inject the uploaded file
-// as persistent system context for every Gemini WebSocket setup/switch.
-const FORCE_FULL_FILE_CONTEXT_MODE =
-  (process.env.FORCE_FULL_FILE_CONTEXT_MODE ?? 'true').toLowerCase() !== 'false';
-
-// Resumption tokens are valid for 2 hours after the last session termination
-// (per Google docs), but we never need to hold them longer than the lifetime
-// of this SessionHandler, so no expiry logic is required here.
 
 type SessionHandlerDeps = {
   consumeDocumentConfig: (configId: string) => Promise<UploadedDocumentConfig | null>;
@@ -60,49 +48,37 @@ type SessionHandlerDeps = {
 
 export class SessionHandler {
   private ws: WebSocket;
-  private professor: ProfessorAgent | null = null;
+  private agent: InterviewAgent | null = null;
   private sessionId: string;
   private isStarting = false;
   private pendingMicByte: Buffer | null = null;
   private pendingTtsByte: Buffer | null = null;
   private pendingTextPrompts: string[] = [];
-  // Audio chunks buffered while a context-switch is in progress (prevents
-  // interruption audio from being lost when the old WS is torn down mid-switch).
   private pendingAudioChunks: Buffer[] = [];
   private isContextSwitching = false;
   private costTracker = new SessionCostTracker();
   private sessionCostSummarySent = false;
   private selectedAssistantId: AssistantId = DEFAULT_ASSISTANT_ID;
-  private selectedContextFiles: string[] = [];
-  private selectedSummaryFiles: string[] = [];
-  private selectedRagFiles: string[] = [];
-  private persistentFileContextBlock: string | null = null;
   private uploadedDocumentDir: string | null = null;
-  private ragService: BrowserRagService | null = null;
   private readonly deps: SessionHandlerDeps;
 
-  // ── Instructions injected at session start ───────────────────────────────
+  private jobDescriptionText: string | null = null;
+  private interviewStructure: InterviewStructure | null = null;
+  private transcriptLines: Array<{ role: 'user' | 'model'; text: string }> = [];
+  private feedbackSent = false;
+
   private enrichedInstructions: string | null = null;
 
-  // ── Context Compaction (Observational Memory) ─────────────────────────────
   private contextManager: ContextManager | null = null;
 
-  // ── Session file logger ───────────────────────────────────────────────────
   private sessionLogger: SessionLogger | null = null;
 
-  // ── Session Resumption state ─────────────────────────────────────────────
-  // Google sends sessionResumptionUpdate messages throughout the session.
-  // We keep the latest resumable handle so we can pass it on reconnect.
   private resumptionHandle: string | null = null;
   private reconnectAttempts = 0;
   private isReconnecting = false;
   private isUserActive = false;
-  // When true, a deliberate end_session was requested — don't auto-reconnect.
   private intentionalClose = false;
 
-  // ── Raw Gemini WebSocket plumbing ────────────────────────────────────────
-  // We attach one message listener to the underlying Gemini WS to capture
-  // resumption handles and goAway signals before Mastra processes them.
   private geminiWs: WebSocket | null = null;
   private geminiWsMessageListener: ((data: RawData) => void) | null = null;
 
@@ -174,20 +150,19 @@ export class SessionHandler {
         break;
       case 'end_session':
         this.intentionalClose = true;
+        await this.generateAndSendFeedback();
         await this.cleanup();
+        if (this.ws.readyState === WebSocket.OPEN) this.ws.close();
         break;
       case 'simulate_disconnect':
         if (this.geminiWs) {
           console.log(`[${this.sessionId}] Simulating Google disconnect...`);
-          // Forcefully emit an error and terminate to trigger the reconnect logic
           this.geminiWs.emit('error', new Error('Simulated Google WebSocket closure'));
           this.geminiWs.terminate();
         }
         break;
       case 'audio_chunk':
-        if (!msg.data || !this.professor) break;
-        // Don't forward audio while we're in the middle of a reconnect —
-        // the Gemini socket isn't open yet and send() would throw.
+        if (!msg.data || !this.agent) break;
         if (this.isReconnecting) break;
 
         {
@@ -221,7 +196,7 @@ export class SessionHandler {
 
           try {
             const int16 = new Int16Array(aligned.buffer, aligned.byteOffset, aligned.byteLength / 2);
-            await this.professor.voice.send(int16);
+            await this.agent.voice.send(int16);
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             if (!msg.includes('closed')) {
@@ -237,13 +212,13 @@ export class SessionHandler {
         // Mirror typed input immediately in the UI transcript.
         this.sendJSON({ type: 'transcript', role: 'user', text });
 
-        if (this.isReconnecting || this.isContextSwitching || !this.professor) {
+        if (this.isReconnecting || this.isContextSwitching || !this.agent) {
           this.pendingTextPrompts.push(text);
-          this.sendStatus('Messaggio testuale accodato: verra inviato appena la connessione e pronta.');
+          this.sendStatus('Message queued — will be sent when the connection is ready.');
           break;
         }
 
-        const sent = this.sendRealtimeText(this.professor.voice, text);
+        const sent = this.sendRealtimeText(this.agent.voice, text);
         if (!sent) {
           this.pendingTextPrompts.push(text);
           if (!this.intentionalClose) {
@@ -276,7 +251,7 @@ export class SessionHandler {
   // ─── Session Lifecycle ──────────────────────────────────────────────────────
 
   private async startSession(documentConfigId?: string) {
-    if (this.professor || this.isStarting) {
+    if (this.agent || this.isStarting) {
       this.sendStatus('Session already active');
       return;
     }
@@ -285,169 +260,97 @@ export class SessionHandler {
     if (documentConfigId && !uploadConfig) {
       this.sendJSON({
         type: 'error',
-        message: 'La selezione documenti e scaduta. Seleziona di nuovo i file e riavvia la sessione.',
+        message: 'Document selection expired. Please re-upload the file and restart the session.',
       });
       return;
     }
 
-    const uploadedContextFiles = uploadConfig?.contextFiles ?? [];
-    const summaryFiles = uploadConfig?.summaryFiles ?? [];
-    const explicitRagFiles = uploadConfig?.ragFiles ?? [];
-    const effectiveRagFiles = explicitRagFiles.length > 0 ? explicitRagFiles : [...summaryFiles];
-
     this.uploadedDocumentDir = uploadConfig?.uploadDir ?? null;
-    this.selectedContextFiles =
-      uploadedContextFiles.length > 0
-        ? [...uploadedContextFiles]
-        : [...new Set([...summaryFiles, ...effectiveRagFiles])];
-    this.selectedSummaryFiles = summaryFiles;
-    this.selectedRagFiles = effectiveRagFiles;
-    this.persistentFileContextBlock = null;
-
-    if (!FORCE_FULL_FILE_CONTEXT_MODE && this.selectedRagFiles.length > 0) {
-      this.ragService = new BrowserRagService({
-        documentPaths: this.selectedRagFiles,
-        indexSuffix: this.sessionId,
-      });
-    } else {
-      this.ragService = null;
-    }
 
     this.intentionalClose = false;
     this.reconnectAttempts = 0;
     this.costTracker.reset();
     this.sessionCostSummarySent = false;
+    this.transcriptLines = [];
+    this.feedbackSent = false;
+    this.jobDescriptionText = null;
 
-    if (FORCE_FULL_FILE_CONTEXT_MODE && this.selectedContextFiles.length === 0) {
-      this.sendJSON({
-        type: 'error',
-        message: 'Carica un documento di contesto prima di avviare la sessione.',
-      });
-      return;
-    }
+    const contextFiles = uploadConfig?.contextFiles ?? [];
+    let instructions = INTERVIEW_COACH_PROMPT;
+    const initialState: AnyAssistantState = {
+      behavioral_directives: [],
+      user_language: '',
+      candidate_info: { name: '', background: '' },
+      current_phase: 'introduction',
+      questions_asked: [],
+      overall_impression: '',
+    } as AnyAssistantState;
 
-    if (this.selectedContextFiles.length > 0) {
+    if (contextFiles.length > 0) {
       try {
-        const docs = await documentService.getDocumentsHashAndText(this.selectedContextFiles);
+        const docs = await documentService.getDocumentsHashAndText(contextFiles);
         if (docs.text.trim().length > 0) {
-          this.persistentFileContextBlock = this.buildPersistentFileContextBlock(
-            docs.hash,
-            docs.files,
-          );
-        } else if (FORCE_FULL_FILE_CONTEXT_MODE) {
-          this.sendJSON({
-            type: 'error',
-            message: 'Il file caricato non contiene testo utilizzabile per il contesto persistente.',
-          });
-          return;
+          this.jobDescriptionText = docs.text;
+
+          const structureResult = await documentService.generateInterviewStructure(docs.text);
+          if (structureResult.structure) {
+            this.interviewStructure = structureResult.structure;
+            instructions =
+              INTERVIEW_COACH_PROMPT +
+              `\n\n## Job Description\n\n${docs.text}\n\n## Interview Plan\n\n${JSON.stringify(structureResult.structure, null, 2)}`;
+          } else {
+            instructions = INTERVIEW_COACH_PROMPT + `\n\n## Job Description\n\n${docs.text}`;
+          }
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        if (FORCE_FULL_FILE_CONTEXT_MODE) {
-          this.sendJSON({
-            type: 'error',
-            message: `Impossibile leggere il file di contesto: ${message}`,
-          });
-          return;
-        }
-        console.warn(`[${this.sessionId}] Failed to load persistent file context: ${message}`);
+        console.warn(`[${this.sessionId}] Failed to load job description: ${message}`);
       }
     }
 
-    const sessionMode: SessionMode = 'FREE_ROAM';
-    const hasDocuments = this.selectedContextFiles.length > 0;
-    console.log(
-      `[${this.sessionId}] Professor session mode: ${sessionMode} (context files: ${this.selectedContextFiles.length}, docs: ${hasDocuments ? 'yes' : 'none'})`,
-    );
-
-    // ── Build instructions for professor_file_context_prompt ─────────────
-    let instructions: string;
-    let initialState: AnyAssistantState | null = null;
-
-    instructions = PROFESSOR_FILE_CONTEXT_PROMPT;
-    initialState = {
-      session_mode: 'FREE_ROAM',
-      user_language: '',
-      behavioral_directives: [],
-      student_info: { name: '', education_level: '' },
-      current_topic: '',
-      topics_to_cover: [],
-      covered_concepts: [],
-      overall_evaluation: '',
-    } as AnyAssistantState;
-
-    const markdown = generateMarkdownSummary(initialState, 'FREE_ROAM');
+    const markdown = generateMarkdownSummary(initialState);
     instructions += '\n\n---\n' + markdown;
-    console.log(`[${this.sessionId}] Initial FREE_ROAM state (markdown):\n${markdown}`);
 
-    instructions = this.withPersistentFileContext(instructions);
     this.enrichedInstructions = instructions;
-
-    // ── Initialise ContextManager ────────────────────────────────────────
-    // Base instructions only (no memory block). The compact state is re-injected
-    // by assembleSystemInstruction on each context switch.
-    const basePromptRaw = PROFESSOR_FILE_CONTEXT_PROMPT;
-    const basePrompt = this.withPersistentFileContext(basePromptRaw);
 
     this.contextManager = new ContextManager({
       sessionId: this.sessionId,
       assistantId: this.selectedAssistantId,
-      baseSystemPrompt: basePrompt,
-      sessionMode: 'FREE_ROAM',
+      baseSystemPrompt: instructions,
     });
-    // Seed the initial state so the first extraction merges INTO it.
-    if (initialState) {
-      this.contextManager.setInitialState(initialState);
-    }
+    this.contextManager.setInitialState(initialState);
     this.contextManager.on('switchReady', (payload) => this.handleContextSwitch(payload));
     this.contextManager.on('extractionUsage', (inputTokens, outputTokens) => {
       this.costTracker.recordExtractionUsage(inputTokens, outputTokens);
     });
 
-    // Initialise session file logger (writes to logs/sessions/ on teardown).
     this.sessionLogger = new SessionLogger(this.sessionId, this.selectedAssistantId);
 
     await this.connectToGemini(false);
   }
 
-  /**
-   * Core connection method, used for both fresh starts and silent reconnects.
-   *
-   * @param isReconnect  When true, we pass the resumption handle to Google
-   *                     so it restores the conversation state, and we skip
-   *                     the opening greeting (Gemini already knows the context).
-   */
   private async connectToGemini(isReconnect: boolean) {
     if (this.isStarting) return;
     this.isStarting = true;
 
-    let createdProfessor: ProfessorAgent | null = null;
+    let createdAgent: InterviewAgent | null = null;
 
     try {
       if (!isReconnect) {
         this.sendStatus(`Connecting to ${this.getAssistantLabel(this.selectedAssistantId)}...`);
-        void this.ragService?.ensureReady().catch((err) => {
-          const msg = err instanceof Error ? err.message : String(err);
-          console.warn(`[${this.sessionId}] RAG warmup failed:`, msg);
-        });
-        // rag warmup failed will be emitted when the user starts a session and the ragService tries to load the embedding model and the vector store. We want to warm up the ragService at this point to minimize latency on the first RAG query, but if it fails we don't want to block the session start — the assistant can still function without RAG, albeit with less relevant responses until it's ready. The warning log will help us identify any issues with the RAG warmup process in production. 
       }
 
-      // Use enriched instructions (with persistent full-file context) when available.
-      const instructions =
-        this.enrichedInstructions ?? PROFESSOR_FILE_CONTEXT_PROMPT;
-      createdProfessor = createProfessorAgent({
+      const instructions = this.enrichedInstructions ?? INTERVIEW_COACH_PROMPT;
+      createdAgent = createInterviewAgent({
         instructions,
         name: this.getAssistantLabel(this.selectedAssistantId),
       });
-      const { voice } = createdProfessor;
+      const { voice } = createdAgent;
 
       const reconnectWithHandle = isReconnect && !!this.resumptionHandle;
 
-      // Patch setup event: disable automatic VAD, and inject resumption handle if reconnecting.
       this.patchSetupEvent(voice, reconnectWithHandle ? (this.resumptionHandle ?? undefined) : undefined);
 
-      // ── Audio from Gemini → Browser ────────────────────────────────────────
       voice.on('speaker', (audioStream: NodeJS.ReadableStream) => {
         audioStream.on('data', (chunk: Buffer | Uint8Array | string) => {
           if (this.ws.readyState !== WebSocket.OPEN) return;
@@ -483,18 +386,13 @@ export class SessionHandler {
         });
       });
 
-      // ── Transcripts ────────────────────────────────────────────────────────
       voice.on('writing', ({ text, role }: { text: string; role: string }) => {
         this.sendJSON({ type: 'transcript', role, text });
         console.log(`[${this.sessionId}] ${role}: ${text}`);
-        // Feed into ContextManager for compaction (the spy also feeds from
-        // mirrorAutomaticTranscriptions, but the 'writing' event may arrive
-        // from different code paths in the SDK — duplicates are harmless as
-        // transcript text is append-only).
         if (role === 'user' || role === 'model') {
           this.contextManager?.addTranscriptEntry(role, text);
+          this.transcriptLines.push({ role, text });
         }
-        // 'assistant' is the SDK role name for model turns; normalize for the logger.
         this.sessionLogger?.addTranscriptLine(role === 'user' ? 'user' : 'model', text);
       });
 
@@ -513,14 +411,8 @@ export class SessionHandler {
         }
       });
 
-      if (this.ragService) this.attachRagTool(voice);
-
-      // ── Connect ────────────────────────────────────────────────────────────
       await voice.connect();
 
-      // If the user was speaking when this new WS was established (reconnect or
-      // context switch), immediately signal activityStart so Gemini knows a turn
-      // is in progress and doesn't discard the incoming audio.
       if (this.isUserActive) {
         const gWs = this.getGeminiWebSocket(voice);
         if (gWs && gWs.readyState === WebSocket.OPEN) {
@@ -529,22 +421,18 @@ export class SessionHandler {
         }
       }
 
-      // ── Capture resumption handles from raw Gemini messages ───────────────
       this.attachGeminiMessageSpy(voice);
 
-      // Swap in the new professor atomically
-      const oldProfessor = this.professor;
-      this.professor = createdProfessor;
-      createdProfessor = null; // prevent cleanup in finally block
+      const oldAgent = this.agent;
+      this.agent = createdAgent;
+      createdAgent = null;
 
-      if (oldProfessor) {
-        // Destroy the old voice instance quietly — its WS is already dead
-        oldProfessor.destroy().catch(() => {});
+      if (oldAgent) {
+        oldAgent.destroy().catch(() => {});
       }
 
       this.reconnectAttempts = 0;
       this.isReconnecting = false;
-      // Open a new log episode for this WebSocket connection.
       this.sessionLogger?.startEpisode(
         isReconnect ? 'reconnect' : 'initial_connection',
         this.costTracker.getFullTokenSnapshot(),
@@ -554,19 +442,13 @@ export class SessionHandler {
 
       if (!isReconnect) {
         this.sendStatus(`Connected! ${this.getAssistantLabel(this.selectedAssistantId)} is ready.`);
-        // Fresh session: send the opening prompt
-        this.geminiSpeakFirst(
-          voice,
-            this.getOpeningPrompt(this.selectedAssistantId)
-        );
+        this.geminiSpeakFirst(voice, this.getOpeningPrompt(this.selectedAssistantId));
       } else {
         if (reconnectWithHandle) {
-          // Reconnected: Gemini has context from the resumption handle.
-          this.sendStatus('Connessione ripristinata.');
+          this.sendStatus('Connection restored.');
           console.log(`[${this.sessionId}] Session resumed transparently (attempt ${this.reconnectAttempts + 1})`);
         } else {
-          // Fallback path: we restored transport but not conversation state.
-          this.sendStatus('Connessione ripristinata, ma il contesto precedente non e stato recuperato.');
+          this.sendStatus('Connection restored (context may not be fully preserved).');
           console.warn(`[${this.sessionId}] Reconnected without resumption handle: context continuity not guaranteed.`);
         }
       }
@@ -575,17 +457,16 @@ export class SessionHandler {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[${this.sessionId}] Failed to connect (reconnect=${isReconnect}):`, message);
 
-      if (createdProfessor) {
-        await createdProfessor.destroy();
+      if (createdAgent) {
+        await createdAgent.destroy();
       }
 
       if (isReconnect && !this.intentionalClose) {
-        // Connection attempt itself failed — try again
         this.scheduleReconnect();
       } else if (!isReconnect) {
         this.sendStatus(`Connection failed: ${message}`);
         this.sendJSON({ type: 'error', message: `Failed to connect: ${message}` });
-        this.professor = null;
+        this.agent = null;
       }
     } finally {
       this.isStarting = false;
@@ -601,14 +482,14 @@ export class SessionHandler {
 
     if (this.reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
       console.error(`[${this.sessionId}] Max reconnect attempts (${MAX_RECONNECT_ATTEMPTS}) reached. Giving up.`);
-      this.sendJSON({ type: 'error', message: 'Impossibile ripristinare la connessione. Ricarica la pagina.' });
+      this.sendJSON({ type: 'error', message: 'Unable to restore connection. Please reload the page.' });
       this.cleanup();
       return;
     }
 
     this.isReconnecting = true;
     console.log(`[${this.sessionId}] Scheduling reconnect attempt ${this.reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS} in ${RECONNECT_DELAY_MS}ms`);
-    this.sendStatus('Riconnessione in corso...');
+    this.sendStatus('Reconnecting...');
 
     setTimeout(() => {
       if (this.intentionalClose) {
@@ -639,7 +520,7 @@ export class SessionHandler {
     );
     // Record the compact state against the outgoing episode before the new one opens.
     this.sessionLogger?.recordCompactState(payload.compactState, payload.extractionModel);
-    this.sendStatus('Ottimizzazione della memoria in corso...');
+    this.sendStatus('Optimizing memory...');
 
     await this.connectToGeminiWithContext(payload);
   }
@@ -654,14 +535,14 @@ export class SessionHandler {
     this.isStarting = true;
     this.isContextSwitching = true;
 
-    let createdProfessor: ProfessorAgent | null = null;
+    let createdAgent: InterviewAgent | null = null;
 
     try {
-      createdProfessor = createProfessorAgent({
+      createdAgent = createInterviewAgent({
         instructions: payload.systemInstruction,
         name: this.getAssistantLabel(this.selectedAssistantId),
       });
-      const { voice } = createdProfessor;
+      const { voice } = createdAgent;
 
       // Disable automatic VAD on the new context-switch connection.
       // (No resumption handle — context switch deliberately starts a fresh session.)
@@ -725,6 +606,7 @@ export class SessionHandler {
         this.sendJSON({ type: 'transcript', role, text });
         if (role === 'user' || role === 'model') {
           this.contextManager?.addTranscriptEntry(role, text);
+          this.transcriptLines.push({ role, text });
         }
         this.sessionLogger?.addTranscriptLine(role === 'user' ? 'user' : 'model', text);
       });
@@ -738,7 +620,6 @@ export class SessionHandler {
         if (!this.intentionalClose) this.scheduleReconnect();
       });
 
-      if (this.ragService) this.attachRagTool(voice);
       await voice.connect();
 
       // If the user was speaking when this new WS was established (reconnect or
@@ -754,13 +635,12 @@ export class SessionHandler {
 
       this.attachGeminiMessageSpy(voice);
 
-      // Atomic swap.
-      const oldProfessor = this.professor;
-      this.professor = createdProfessor;
-      createdProfessor = null;
+      const oldAgent = this.agent;
+      this.agent = createdAgent;
+      createdAgent = null;
 
-      if (oldProfessor) {
-        oldProfessor.destroy().catch(() => {});
+      if (oldAgent) {
+        oldAgent.destroy().catch(() => {});
       }
 
       this.reconnectAttempts = 0;
@@ -778,13 +658,13 @@ export class SessionHandler {
       // Open the new log episode (this also closes the outgoing episode with the same snapshot).
       this.sessionLogger?.startEpisode('context_switch', this.costTracker.getFullTokenSnapshot());
 
-      this.sendStatus('Memoria ottimizzata. La conversazione continua.');
+      this.sendStatus('Memory optimized. Conversation continues.');
       console.log(`[${this.sessionId}] Context switch completed successfully.`);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[${this.sessionId}] Context switch failed:`, message);
-      if (createdProfessor) {
-        await createdProfessor.destroy();
+      if (createdAgent) {
+        await createdAgent.destroy();
       }
       // Discard buffered audio — the old WS is still alive so audio will
       // resume normally from the next chunk.
@@ -1002,6 +882,8 @@ export class SessionHandler {
     this.contextManager?.addTranscriptEntry(role, text);
     // Audio transcriptions are the primary transcript source in voice mode.
     this.sessionLogger?.addTranscriptLine(role, text);
+    // Capture for end-of-session feedback generation.
+    this.transcriptLines.push({ role, text });
   }
 
   private mirrorAutomaticTranscriptions(data: any) {
@@ -1061,93 +943,6 @@ export class SessionHandler {
     data.setup.sessionResumption = { handle };
   }
 
-  // ─── RAG Tool ────────────────────────────────────────────────────────────────
-
-  private attachRagTool(voice: any) { // the model has a field called "tools" which is a map of tool definitions
-    voice.addTools({
-      search_documents: {
-        description: 'Cerca informazioni nei PDF locali indicizzati dal server.',
-        parameters: {
-          type: 'object',
-          properties: {
-            query: {
-              type: 'string',
-              description: 'Query breve e precisa per cercare nei documenti.',
-            },
-          },
-          required: ['query'],
-        },
-        execute: async (input: { query?: string }) => {
-          const query = String(input?.query ?? '').trim();
-          if (!query) {
-            return { result: 'Errore: query vuota.', sources: [] };
-          }
-
-          if (!this.ragService) {
-            this.sendStatus('RAG: nessun documento selezionato per la ricerca.');
-            return {
-              result:
-                'Nessun documento RAG disponibile in questa sessione. Carica almeno un documento nel campo RAG o Summary prima di avviare.',
-              sources: [],
-              scores: [],
-            };
-          }
-
-          this.sendStatus(`RAG: ricerca nei documenti per "${query}"`);
-
-          const { relevantContext, sources, scoredSources } = await this.ragService.queryRelevantContext(query, 5);
-
-          this.sendJSON({
-            type: 'rag_tool_called',
-            query,
-            sources,
-            scores: scoredSources.map((s) => ({ file: s.file, score: s.score })),
-          });
-
-          let toolResult: {
-            result: string;
-            sources: string[];
-            scores: Array<{ file: string; score: number }>;
-          };
-
-          if (!relevantContext) {
-            if (sources.length > 0) {
-              this.sendStatus(`RAG: trovate fonti, ma poco contesto testuale (${sources.join(', ')}).`);
-              toolResult = {
-                result: `Documenti trovati: ${sources.join(', ')}.`,
-                sources,
-                scores: scoredSources.map((s) => ({ file: s.file, score: s.score })),
-              };
-              this.costTracker.recordRagUsage(toolResult);
-              this.sessionLogger?.recordRagCall(query, sources, Math.max(1, Math.ceil(JSON.stringify(toolResult).length / 4)));
-              return toolResult;
-            }
-            this.sendStatus('RAG: nessuna corrispondenza trovata.');
-            toolResult = {
-              result: 'Nessuna corrispondenza nei documenti caricati.',
-              sources,
-              scores: scoredSources.map((s) => ({ file: s.file, score: s.score })),
-            };
-            this.costTracker.recordRagUsage(toolResult);
-            this.sessionLogger?.recordRagCall(query, sources, Math.max(1, Math.ceil(JSON.stringify(toolResult).length / 4)));
-            return toolResult;
-          }
-
-          this.sendStatus(`RAG: trovate ${sources.length || 1} fonti rilevanti.`);
-          toolResult = {
-            result: relevantContext,
-            sources,
-            scores: scoredSources.map((s) => ({ file: s.file, score: s.score })),
-          };
-          this.costTracker.recordRagUsage(toolResult);
-          this.sessionLogger?.recordRagCall(query, sources, Math.max(1, Math.ceil(JSON.stringify(toolResult).length / 4)));
-          return toolResult;
-        },
-      },
-    });
-  }
-
-  // ─── Cleanup ─────────────────────────────────────────────────────────────────
 
   private async cleanup() {
     // ── Session file log ───────────────────────────────────────────────────
@@ -1173,7 +968,6 @@ export class SessionHandler {
     this.isReconnecting = false;
     this.isContextSwitching = false;
     this.isUserActive = false;
-    this.ragService = null;
 
     if (this.contextManager) {
       this.contextManager.removeAllListeners();
@@ -1186,10 +980,10 @@ export class SessionHandler {
       this.geminiWs = null;
     }
 
-    if (this.professor) {
-      await this.professor.destroy();
-      this.professor = null;
-      console.log(`[${this.sessionId}] Professor agent destroyed`);
+    if (this.agent) {
+      await this.agent.destroy();
+      this.agent = null;
+      console.log(`[${this.sessionId}] Interview agent destroyed`);
     }
 
     if (this.uploadedDocumentDir) {
@@ -1201,12 +995,6 @@ export class SessionHandler {
       this.uploadedDocumentDir = null;
     }
 
-    this.selectedContextFiles = [];
-    this.selectedSummaryFiles = [];
-    this.selectedRagFiles = [];
-    this.persistentFileContextBlock = null;
-
-    // Wait for the session log file to finish writing.
     await sessionLogPromise;
   }
 
@@ -1274,38 +1062,33 @@ export class SessionHandler {
     });
   }
 
-  // ─── Helpers ─────────────────────────────────────────────────────────────────
+  private async generateAndSendFeedback(): Promise<void> {
+    if (this.feedbackSent || this.transcriptLines.length === 0) return;
+    this.feedbackSent = true;
 
-  private withPersistentFileContext(instructions: string): string {
-    if (!this.persistentFileContextBlock) return instructions;
-    if (instructions.includes('## PERSISTENT FILE CONTEXT')) return instructions;
-    return `${instructions}\n\n---\n${this.persistentFileContextBlock}`;
-  }
+    const transcript = this.transcriptLines
+      .map((l) => `${l.role === 'user' ? 'Candidate' : 'Interviewer'}: ${l.text}`)
+      .join('\n');
 
-  private buildPersistentFileContextBlock(
-    hash: string,
-    files: Array<{ name: string; normalizedText: string }>,
-  ): string {
-    const fileBlocks = files
-      .map((file) => {
-        return [
-          `### FILE: ${file.name}`,
-          '```text',
-          file.normalizedText,
-          '```',
-        ].join('\n');
-      })
-      .join('\n\n');
+    const jdSection = this.jobDescriptionText
+      ? `\n\n## Job Description\n\n${this.jobDescriptionText}`
+      : '';
 
-    return [
-      '## PERSISTENT FILE CONTEXT',
-      'This section is always part of your active system instructions.',
-      'Use the content below as the canonical reference for the whole session, including reconnects and context switches.',
-      'Do not call document retrieval tools for information that is already present in this context.',
-      `Context hash: ${hash}`,
-      '',
-      fileBlocks,
-    ].join('\n');
+    const prompt = `You are an expert interview coach. Analyze the following interview transcript and provide a structured feedback report in Markdown format.${jdSection}\n\n## Interview Transcript\n\n${transcript}\n\nWrite a concise feedback report with these sections:\n1. Overall Assessment\n2. Strengths\n3. Areas for Improvement\n4. Key Recommendation`;
+
+    try {
+      const google = createGoogleGenerativeAI({
+        apiKey: process.env.GEMINI_LLM_API_KEY ?? process.env.GEMINI_LIVE_API_KEY ?? '',
+      });
+      const { text: markdown } = await generateText({
+        model: google('gemini-3.1-flash-lite-preview'),
+        prompt,
+      });
+      this.sendJSON({ type: 'interview_feedback', markdown });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[${this.sessionId}] generateAndSendFeedback failed:`, message);
+    }
   }
 
   private sendJSON(obj: object) {
@@ -1319,10 +1102,11 @@ export class SessionHandler {
   }
 
   private getAssistantLabel(_assistantId: AssistantId): string {
-    return 'Il Professore';
+    return 'Interview Coach';
   }
 
   private getOpeningPrompt(_assistantId: AssistantId): string {
-    return `Presentati come il professore. Deduci la materia dal documento nel contesto persistente e chiedi allo studente solo il nome.`;
+    const roleTitle = this.interviewStructure?.role_title ?? 'the position';
+    return `Greet the candidate warmly, introduce yourself as their interviewer for the ${roleTitle} role, and ask only for their name to get started. Do not ask what role they are applying for.`;
   }
 }
