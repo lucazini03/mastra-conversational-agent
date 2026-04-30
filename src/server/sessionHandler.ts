@@ -5,21 +5,24 @@
 //   Browser mic PCM → GeminiLive → Browser speaker PCM
 //
 // Protocol (all text frames, JSON):
-//   Browser → Server  { type: 'start_session', documentConfigId?: string, demoId?: string }
+//   Browser → Server  { type: 'start_session', documentConfigId?: string, demoId?: string, practiceContext?: object }
 //   Browser → Server  { type: 'end_session' }
 //   Browser → Server  { type: 'audio_chunk', data: string }   ← base64 Int16 PCM, 16kHz mono
 //   Browser → Server  { type: 'text_prompt', text: string }
 //   Browser → Server  { type: 'language_spoken', language: string }  ← CIAO demo_4: hint for translator
+//   Browser → Server  { type: 'initiate_practice', transcript: Array<{role,text}>, difficulty: string }
 //   Server  → Browser { type: 'transcript', role: 'user'|'model', text: string }
 //   Server  → Browser { type: 'vad_event', source: 'silero'|'gemini', message: string }
 //   Server  → Browser { type: 'status',     message: string }
 //   Server  → Browser { type: 'error',      message: string }
 //   Server  → Browser { type: 'tts_audio',  data: string }    ← base64 Int16 PCM, 24kHz mono
 //   Server  → Browser { type: 'interview_feedback', markdown: string }
+//   Server  → Browser { type: 'practice_ready', context: object }
 
 import { WebSocket, type RawData } from 'ws';
 import { rm } from 'node:fs/promises';
-import { generateText } from 'ai';
+import { generateText, generateObject } from 'ai';
+import { z } from 'zod';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { createInterviewAgent, type InterviewAgent } from '../agent/agentFactory.js';
 import {
@@ -32,6 +35,7 @@ import {
   type AssistantId,
   type CiaoAssistantId,
   type AnyDemoId,
+  type DemoPromptOptions,
 } from '../config/interviewConfig.js';
 import { documentService, type InterviewStructure } from './documentService.js';
 import { SessionCostTracker } from './sessionCostTracker.js';
@@ -89,6 +93,10 @@ export class SessionHandler {
   private geminiWs: WebSocket | null = null;
   private geminiWsMessageListener: ((data: RawData) => void) | null = null;
 
+  // Stored practice context: set when initiate_practice extraction succeeds;
+  // consumed once on the next start_session('demo_4_practice') call.
+  private pendingPracticeContext: unknown | null = null;
+
   constructor(ws: WebSocket, sessionId: string, deps: SessionHandlerDeps) {
     this.ws = ws;
     this.sessionId = sessionId;
@@ -144,6 +152,9 @@ export class SessionHandler {
       documentConfigId?: string;
       demoId?: string;
       language?: string;
+      transcript?: Array<{ role: string; text: string }>;
+      difficulty?: string;
+      practiceContext?: unknown;
     };
     try {
       msg = JSON.parse(raw);
@@ -158,6 +169,10 @@ export class SessionHandler {
         this.selectedAssistantId = isCiaoAssistantId(rawDemoId)
           ? rawDemoId
           : DEFAULT_ASSISTANT_ID;
+        // Client may pass back a practice context extracted in a prior session.
+        if (msg.practiceContext !== undefined) {
+          this.pendingPracticeContext = msg.practiceContext;
+        }
         await this.startSession(msg.documentConfigId);
         break;
       }
@@ -263,6 +278,13 @@ export class SessionHandler {
         console.log(`[${this.sessionId}] language_spoken hint: ${lang}`);
         break;
       }
+      case 'initiate_practice': {
+        await this.handleInitiatePractice(
+          msg.transcript ?? [],
+          (msg.difficulty as 'easy' | 'medium' | 'hard' | undefined) ?? 'easy',
+        );
+        break;
+      }
       default:
         console.warn(`[${this.sessionId}] Unknown message type: ${msg.type}`);
     }
@@ -298,9 +320,16 @@ export class SessionHandler {
     // ── CIAO demos: use the demo-specific system prompt, no doc upload needed ──
     const isCiaoDemo = isCiaoAssistantId(this.selectedAssistantId);
 
+    // Consume any stored practice context (set by initiate_practice flow).
+    const practiceOpts: DemoPromptOptions = {};
+    if (this.selectedAssistantId === 'demo_4_practice' && this.pendingPracticeContext) {
+      practiceOpts.practiceContextJSON = this.pendingPracticeContext;
+      this.pendingPracticeContext = null;
+    }
+
     const contextFiles = uploadConfig?.contextFiles ?? [];
     let instructions = isCiaoDemo
-      ? getDemoPrompt(this.selectedAssistantId as CiaoAssistantId)
+      ? getDemoPrompt(this.selectedAssistantId as CiaoAssistantId, undefined, practiceOpts)
       : INTERVIEW_COACH_PROMPT;
     const initialState: AnyAssistantState = {
       behavioral_directives: [],
@@ -1145,5 +1174,99 @@ export class SessionHandler {
     }
     const roleTitle = this.interviewStructure?.role_title ?? 'the position';
     return `Greet the candidate warmly, introduce yourself as their interviewer for the ${roleTitle} role, and ask only for their name to get started. Do not ask what role they are applying for.`;
+  }
+
+  // ─── Practice Session Extraction ────────────────────────────────────────────
+  //
+  // Called when the browser sends { type: 'initiate_practice' }.
+  // Uses gemini-2.0-flash-lite (cheap text model) + generateObject to turn the
+  // raw transcript array into a structured PracticeContext JSON, then sends it
+  // back to the client.  The client re-sends it as practiceContext on the next
+  // start_session message so the new Gemini Live WS can be seeded with it.
+
+  private async handleInitiatePractice(
+    rawTranscript: Array<{ role: string; text: string }>,
+    difficulty: 'easy' | 'medium' | 'hard',
+  ): Promise<void> {
+    if (rawTranscript.length === 0) {
+      this.sendJSON({
+        type: 'error',
+        message: 'Nessun trascritto disponibile per la sessione di pratica.',
+      });
+      return;
+    }
+
+    this.sendStatus('Preparing practice session...');
+    console.log(`[${this.sessionId}] Extracting practice context from ${rawTranscript.length} transcript lines...`);
+
+    const apiKey = process.env.GEMINI_LLM_API_KEY;
+    if (!apiKey) {
+      this.sendJSON({ type: 'error', message: 'API key not configured.' });
+      return;
+    }
+    const model = process.env.MEMORY_EXTRACTION_MODEL ?? 'gemini-2.0-flash-lite';
+
+    const PracticeContextSchema = z.object({
+      scenario_summary: z.string().describe('A brief summary of what the conversation was about.'),
+      key_vocabulary: z
+        .array(
+          z.object({
+            italian: z.string(),
+            native_language: z.string(),
+          }),
+        )
+        .describe('3-5 key words or short phrases used in the conversation.'),
+      turns: z
+        .array(
+          z.object({
+            speaker: z.enum(['migrant', 'italian_speaker']),
+            intent: z.string().describe('What the speaker was trying to achieve.'),
+            italian_phrase: z.string().describe('The correct Italian phrase for this turn.'),
+            native_phrase: z
+              .string()
+              .describe("The translation of the phrase in the migrant's native language."),
+          }),
+        )
+        .describe('The chronological turns of the conversation.'),
+    });
+
+    const transcriptText = rawTranscript
+      .map(t => `[${t.role === 'user' ? 'MIGRANT' : 'TRANSLATOR'}]: ${t.text}`)
+      .join('\n');
+
+    const nativeLang = process.env.USER_NATIVE_LANGUAGE?.trim() || 'English';
+
+    try {
+      const google = createGoogleGenerativeAI({ apiKey });
+      const { object } = await generateObject({
+        model: google(model),
+        schema: PracticeContextSchema,
+        prompt: `You are a language-learning assistant. The following is a translation session transcript between a migrant (native language: ${nativeLang}) and an Italian speaker, mediated by a real-time translator.
+
+Extract the key information from this conversation to prepare a structured practice exercise that will help the migrant learn to say these phrases in Italian themselves.
+
+TRANSCRIPT:
+${transcriptText}
+
+Extract the scenario summary, 3-5 key vocabulary items, and the conversation turns. For each turn, identify who was speaking (migrant or italian_speaker), their communicative intent, the correct Italian phrase, and its translation in ${nativeLang}.`,
+      });
+
+      this.pendingPracticeContext = object;
+
+      console.log(`[${this.sessionId}] Practice context extracted: ${object.turns.length} turns, ${object.key_vocabulary.length} vocab items.`);
+
+      this.sendJSON({
+        type: 'practice_ready',
+        context: object,
+        difficulty,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[${this.sessionId}] Practice extraction failed:`, message);
+      this.sendJSON({
+        type: 'error',
+        message: `Practice session preparation failed: ${message}`,
+      });
+    }
   }
 }

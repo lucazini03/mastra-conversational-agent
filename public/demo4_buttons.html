@@ -108,6 +108,54 @@
       .transcript-line.user .transcript-label { color: #63d3ff; }
       .transcript-line.model .transcript-label { color: var(--accent); }
       .transcript-text { font-size: 0.92rem; line-height: 1.5; }
+
+      /* Practice mode controls */
+      .practice-bar {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin-top: 18px;
+        flex-wrap: wrap;
+      }
+      .practice-bar label {
+        font-family: var(--font-mono);
+        font-size: 0.72rem;
+        color: var(--muted);
+        white-space: nowrap;
+        text-transform: uppercase;
+        letter-spacing: 0.07em;
+      }
+      #difficultySelect {
+        background: rgba(7,16,27,0.85);
+        border: 1px solid var(--card-border);
+        border-radius: 7px;
+        color: var(--ink);
+        font-family: var(--font-mono);
+        font-size: 0.82rem;
+        padding: 5px 10px;
+        cursor: pointer;
+        outline: none;
+      }
+      #difficultySelect:focus { border-color: var(--accent); }
+      #practiceBtn {
+        flex: 1;
+        min-width: 200px;
+        padding: 10px 18px;
+        border-radius: 10px;
+        border: 1px solid rgba(124,249,204,0.4);
+        background: rgba(124,249,204,0.06);
+        color: var(--accent);
+        font-family: var(--font-display);
+        font-size: 0.88rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: border-color 0.18s, background 0.18s;
+      }
+      #practiceBtn:not(:disabled):hover {
+        border-color: var(--accent);
+        background: rgba(124,249,204,0.14);
+      }
+      #practiceBtn:disabled { opacity: 0.35; cursor: not-allowed; }
     </style>
   </head>
   <body>
@@ -231,6 +279,19 @@
         <div class="transcript-area" id="transcriptArea" aria-live="polite">
           <div id="transcriptEmpty" style="color:var(--muted);font-size:0.85rem;">La traduzione apparirà qui...</div>
           <div id="transcriptLog"></div>
+        </div>
+
+        <!-- Practice mode: difficulty + trigger -->
+        <div class="practice-bar">
+          <label for="difficultySelect">Livello pratica:</label>
+          <select id="difficultySelect">
+            <option value="easy">Facile (A1)</option>
+            <option value="medium">Medio (A2)</option>
+            <option value="hard">Difficile (B1)</option>
+          </select>
+          <button id="practiceBtn" type="button" disabled>
+            Termina Traduzione &amp; Inizia Pratica
+          </button>
         </div>
       </section>
     </main>

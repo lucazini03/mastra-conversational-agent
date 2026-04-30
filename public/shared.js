@@ -41,6 +41,10 @@
   const nativeSpeakBtn = document.getElementById('nativeSpeakBtn');
   const italianSpeakBtn = document.getElementById('italianSpeakBtn');
 
+  // Demo-4 practice mode UI
+  const practiceBtn = document.getElementById('practiceBtn');
+  const difficultySelect = document.getElementById('difficultySelect');
+
   // ── State ──────────────────────────────────────────────────────────────────
   let ws = null;
   let micVad = null;
@@ -64,6 +68,11 @@
   let wt_processor = null;
   let wt_activeButton = null;       // 'native' | 'italian' | null
   let wt_pendingByte = null;        // odd-byte buffer for alignment
+
+  // Demo-4 practice session state
+  let transcriptLinesData = [];     // [{role, text}] accumulated during translation session
+  let selectedDifficulty = 'easy'; // mirrors #difficultySelect value
+  let pendingPracticeContext = null; // set when practice_ready arrives, consumed on ws.onclose
 
   // ── Robot animation ──────────────────────────────────────────────────────
   function setRobotSpeaking(speaking) {
@@ -167,6 +176,11 @@
 
     const result = createTranscriptLine(role, normalizedText);
     lastTranscriptEntry = { role, text: normalizedText, at: now, wrap: result?.wrap, bodyEl: result?.body };
+
+    // Accumulate transcript for demo_4 practice feature.
+    if (DEMO_ID === 'demo_4' || DEMO_ID === 'demo_4_practice') {
+      transcriptLinesData.push({ role, text: normalizedText });
+    }
   }
 
   // ── Status helpers ─────────────────────────────────────────────────────────
@@ -419,13 +433,15 @@
     }
   }
 
-  // ── Session lifecycle ──────────────────────────────────────────────────────
-  async function startSession() {
-    if (ws) return;
+  // ── Practice session (demo_4) ──────────────────────────────────────────────
+  async function startPracticeSession(context, difficulty) {
+    if (ws) return; // already have a session open
+    transcriptLinesData = []; // reset for the new session
     sessionReady = false;
     setDisabled(startBtn, true);
-    setStatus('Connessione...', '');
-    setHint('Connessione al server in corso...');
+    setDisabled(practiceBtn, true);
+    setStatus('Connessione pratica...', '');
+    setHint('Avvio sessione di pratica in italiano...');
 
     const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(`${scheme}//${window.location.host}`);
@@ -433,17 +449,18 @@
 
     ws.onopen = async () => {
       try {
-        // For demos 1-3, start Silero VAD; for demo 4, wait for push-to-talk.
         if (!IS_WALKIE_TALKIE) {
           await startMicCapture();
         }
-        ws.send(JSON.stringify({ type: 'start_session', demoId: DEMO_ID }));
+        ws.send(JSON.stringify({
+          type: 'start_session',
+          demoId: 'demo_4_practice',
+          practiceContext: context,
+        }));
         startConversationTimer();
         setDisabled(stopBtn, false);
-        if (IS_WALKIE_TALKIE) {
-          setWalkieTalkieButtonsDisabled(false);
-        }
-        setHint('Sessione attiva. In attesa del tutor...');
+        if (IS_WALKIE_TALKIE) setWalkieTalkieButtonsDisabled(false);
+        setHint('Sessione di pratica attiva. Ascolta il tutor...');
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         setStatus('Errore microfono', 'error');
@@ -452,7 +469,14 @@
       }
     };
 
-    ws.onmessage = (event) => {
+    attachCommonWsHandlers(ws);
+  }
+
+  // ── Session lifecycle ──────────────────────────────────────────────────────
+
+  // Shared WS message/error/close handlers — used by both startSession and startPracticeSession.
+  function attachCommonWsHandlers(socket) {
+    socket.onmessage = (event) => {
       if (typeof event.data !== 'string') return;
       let msg;
       try { msg = JSON.parse(event.data); } catch { return; }
@@ -463,6 +487,8 @@
           sessionReady = true;
           setStatus('Connesso', 'connected');
           setHint(getReadyHint());
+          // Enable practice button once session is live (demo_4 translation only)
+          if (DEMO_ID === 'demo_4') setDisabled(practiceBtn, false);
         } else if (txt.includes('Connection restored')) {
           setStatus('Connesso', 'connected');
         } else if (!txt.includes('Reconnecting') && !txt.includes('Optimizing')) {
@@ -495,14 +521,29 @@
         setStatus('Sessione terminata', '');
         setHint('La sessione è terminata. Puoi iniziarne una nuova.');
       }
+
+      if (msg.type === 'practice_ready') {
+        // Server has extracted the practice context.  Store it so that onclose
+        // can start the practice session after the WS fully closes.
+        pendingPracticeContext = msg.context ?? null;
+        const diff = msg.difficulty ?? selectedDifficulty;
+        // Now cleanly end the translation session.
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'end_session' }));
+        }
+        // Note: the actual practice session start happens in ws.onclose below.
+        setStatus('Avvio pratica...', 'connected');
+        setHint('Sessione di traduzione terminata. Avvio sessione di pratica...');
+        selectedDifficulty = diff;
+      }
     };
 
-    ws.onerror = () => {
+    socket.onerror = () => {
       setStatus('Errore connessione', 'error');
       setHint('Errore WebSocket. Controlla che il server sia in esecuzione.');
     };
 
-    ws.onclose = () => {
+    socket.onclose = () => {
       stopAndClearPlayback();
       if (!IS_WALKIE_TALKIE) stopMicCapture();
       else stopWalkieTalkieMic();
@@ -513,9 +554,55 @@
       setDisabled(startBtn, false);
       setDisabled(stopBtn, true);
       if (IS_WALKIE_TALKIE) setWalkieTalkieButtonsDisabled(true);
+      setDisabled(practiceBtn, true);
+
+      // If a practice_ready message arrived before close, auto-start practice session.
+      if (pendingPracticeContext) {
+        const ctx = pendingPracticeContext;
+        const diff = selectedDifficulty;
+        pendingPracticeContext = null;
+        void startPracticeSession(ctx, diff);
+        return;
+      }
+
       setStatus('Pronto', '');
       setHint('Sessione terminata. Premi "Inizia" per una nuova sessione.');
     };
+  }
+
+  async function startSession() {
+    if (ws) return;
+    sessionReady = false;
+    setDisabled(startBtn, true);
+    setStatus('Connessione...', '');
+    setHint('Connessione al server in corso...');
+
+    const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(`${scheme}//${window.location.host}`);
+    ws.binaryType = 'arraybuffer';
+
+    ws.onopen = async () => {
+      try {
+        // For demos 1-3, start Silero VAD; for demo 4, wait for push-to-talk.
+        if (!IS_WALKIE_TALKIE) {
+          await startMicCapture();
+        }
+        ws.send(JSON.stringify({ type: 'start_session', demoId: DEMO_ID }));
+        startConversationTimer();
+        setDisabled(stopBtn, false);
+        if (IS_WALKIE_TALKIE) {
+          setWalkieTalkieButtonsDisabled(false);
+        }
+        setHint('Sessione attiva. In attesa del tutor...');
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setStatus('Errore microfono', 'error');
+        setHint(`Microfono non disponibile: ${msg}`);
+        stopSession();
+      }
+    };
+
+    attachCommonWsHandlers(ws);
   }
 
   function stopSession() {
@@ -541,11 +628,35 @@
   function setWalkieTalkieButtonsDisabled(disabled) {
     setDisabled(nativeSpeakBtn, disabled);
     setDisabled(italianSpeakBtn, disabled);
+    // also disable practice button whenever walkie-talkie buttons are disabled
+    // (i.e. session not yet active).  Re-enabled explicitly after session ready.
+    if (disabled) setDisabled(practiceBtn, true);
   }
 
   // ── Event wiring ───────────────────────────────────────────────────────────
   startBtn?.addEventListener('click', () => void startSession());
   stopBtn?.addEventListener('click', () => stopSession());
+
+  // Difficulty selector (demo_4)
+  if (difficultySelect) {
+    difficultySelect.addEventListener('change', () => {
+      selectedDifficulty = difficultySelect.value;
+    });
+    selectedDifficulty = difficultySelect.value || 'easy';
+  }
+
+  // Practice button (demo_4)
+  practiceBtn?.addEventListener('click', () => {
+    if (!ws || ws.readyState !== WebSocket.OPEN || !sessionReady) return;
+    setDisabled(practiceBtn, true);
+    setStatus('Analisi conversazione...', 'connected');
+    setHint('Estrazione del contesto di pratica dalla conversazione...');
+    ws.send(JSON.stringify({
+      type: 'initiate_practice',
+      transcript: transcriptLinesData,
+      difficulty: selectedDifficulty,
+    }));
+  });
 
   // Walkie-talkie push-to-talk (demo_4)
   if (IS_WALKIE_TALKIE) {
