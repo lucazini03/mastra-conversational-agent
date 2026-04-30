@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>APP CIAO | Simulazione Farmacia</title>
+    <title>APP CIAO | Traduttore — Pulsanti</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet" />
@@ -33,6 +33,67 @@
       }
       .nav-bar a:hover { color: var(--ink); border-color: var(--card-border); }
       .nav-bar a.active { color: var(--accent); border-color: var(--accent); background: rgba(124,249,204,0.08); }
+
+      /* Walkie-talkie layout */
+      .wt-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+        margin-top: 20px;
+      }
+      .wt-btn {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 10px;
+        padding: 28px 18px;
+        border-radius: 16px;
+        border: 2px solid var(--card-border);
+        background: rgba(10, 18, 30, 0.75);
+        color: var(--ink);
+        font-family: var(--font-display);
+        font-size: 1rem;
+        font-weight: 600;
+        cursor: pointer;
+        user-select: none;
+        -webkit-user-select: none;
+        touch-action: none;
+        transition: border-color 0.15s, background 0.15s, box-shadow 0.15s, transform 0.1s;
+        min-height: 130px;
+        outline: none;
+      }
+      .wt-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+      .wt-btn:disabled { opacity: 0.38; cursor: not-allowed; }
+      .wt-btn svg { opacity: 0.7; transition: opacity 0.15s; }
+
+      /* Native language button (blue tint) */
+      #nativeSpeakBtn { border-color: rgba(99,211,255,0.35); }
+      #nativeSpeakBtn:not(:disabled):hover { background: rgba(99,211,255,0.06); border-color: rgba(99,211,255,0.6); }
+      #nativeSpeakBtn.active {
+        background: rgba(99,211,255,0.14);
+        border-color: #63d3ff;
+        box-shadow: 0 0 22px rgba(99,211,255,0.35);
+        transform: scale(0.975);
+      }
+      #nativeSpeakBtn.active svg { opacity: 1; }
+
+      /* Italian button (green tint) */
+      #italianSpeakBtn { border-color: rgba(124,249,204,0.35); }
+      #italianSpeakBtn:not(:disabled):hover { background: rgba(124,249,204,0.06); border-color: rgba(124,249,204,0.6); }
+      #italianSpeakBtn.active {
+        background: rgba(124,249,204,0.14);
+        border-color: var(--accent);
+        box-shadow: 0 0 22px var(--glow-strong);
+        transform: scale(0.975);
+      }
+      #italianSpeakBtn.active svg { opacity: 1; }
+
+      .wt-btn-icon { width: 38px; height: 38px; }
+      .wt-label { font-size: 0.95rem; text-align: center; line-height: 1.3; pointer-events: none; }
+      .wt-hint { font-size: 0.72rem; color: var(--muted); text-align: center; font-family: var(--font-mono); pointer-events: none; }
+
       .transcript-area {
         margin-top: 20px;
         max-height: 220px;
@@ -56,17 +117,17 @@
     <main class="demo-shell">
       <nav class="nav-bar" aria-label="Demo navigation">
         <a href="/demo1.html">Demo 1 — Esercizi</a>
-        <a href="/demo2.html" class="active">Demo 2 — Farmacia</a>
+        <a href="/demo2.html">Demo 2 — Farmacia</a>
         <a href="/demo3.html">Demo 3 — Colloquio</a>
-        <a href="/demo4_buttons.html">Demo 4A — Traduttore Pulsanti</a>
+        <a href="/demo4_buttons.html" class="active">Demo 4A — Traduttore Pulsanti</a>
         <a href="/demo4_flow.html">Demo 4B — Traduttore Flusso</a>
       </nav>
 
       <header class="hero">
         <p class="kicker">APP CIAO</p>
-        <h1>Simulazione di Vita — Farmacia</h1>
+        <h1>Traduzione — Pulsanti</h1>
         <p class="lead">
-          Parla con il farmacista in italiano. L'AI risponde al tuo intento e ti suggerisce frasi migliori in modo gentile.
+          Tieni premuto il pulsante mentre parli, poi rilascia. L'AI traduce dopo che hai finito.
         </p>
       </header>
 
@@ -80,8 +141,8 @@
               </svg>
             </div>
             <div>
-              <p class="identity-label">Personaggio</p>
-              <p class="identity-title">Farmacista Italiano</p>
+              <p class="identity-label">Modalità</p>
+              <p class="identity-title">Traduttore Push-to-Talk</p>
             </div>
           </div>
           <div class="timer-chip" aria-label="Session duration">
@@ -123,23 +184,64 @@
         </div>
 
         <p class="status" id="status">Pronto</p>
-        <p class="hint" id="sessionHint">Premi <strong>Inizia Sessione</strong> e parla con il farmacista.</p>
+        <p class="hint" id="sessionHint">Premi <strong>Avvia Traduttore</strong>, poi tieni premuto uno dei pulsanti mentre parli e rilascia per ricevere la traduzione.</p>
 
         <div class="actions">
-          <button id="startBtn" class="btn btn-primary">Inizia Sessione</button>
+          <button id="startBtn" class="btn btn-primary">Avvia Traduttore</button>
           <button id="stopBtn" class="btn btn-danger" disabled>Termina</button>
         </div>
 
+        <!-- Walkie-Talkie push-to-talk interface -->
+        <div class="wt-grid" role="group" aria-label="Walkie-talkie controls">
+          <button
+            id="nativeSpeakBtn"
+            class="wt-btn"
+            type="button"
+            disabled
+            aria-label="Hold to speak in your native language"
+          >
+            <svg class="wt-btn-icon" viewBox="0 0 24 24" fill="none" stroke="#63d3ff" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+              <line x1="12" y1="19" x2="12" y2="23"/>
+              <line x1="8" y1="23" x2="16" y2="23"/>
+            </svg>
+            <span class="wt-label">Hold to speak</span>
+            <span class="wt-hint">Native language → IT</span>
+          </button>
+
+          <button
+            id="italianSpeakBtn"
+            class="wt-btn"
+            type="button"
+            disabled
+            aria-label="Hold to speak in Italian"
+          >
+            <svg class="wt-btn-icon" viewBox="0 0 24 24" fill="none" stroke="#7cf9cc" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+              <line x1="12" y1="19" x2="12" y2="23"/>
+              <line x1="8" y1="23" x2="16" y2="23"/>
+            </svg>
+            <span class="wt-label">Hold to speak Italian</span>
+            <span class="wt-hint">IT → Native language</span>
+          </button>
+        </div>
+
         <div class="transcript-area" id="transcriptArea" aria-live="polite">
-          <div id="transcriptEmpty" style="color:var(--muted);font-size:0.85rem;">La trascrizione apparirà qui...</div>
+          <div id="transcriptEmpty" style="color:var(--muted);font-size:0.85rem;">La traduzione apparirà qui...</div>
           <div id="transcriptLog"></div>
         </div>
       </section>
     </main>
 
+    <!-- VAD scripts included to satisfy shared.js window.vad check -->
     <script src="/ort.min.js"></script>
     <script src="/vad.bundle.min.js"></script>
-    <script>window.DEMO_ID = 'demo_2';</script>
+    <script>
+      window.DEMO_ID = 'demo_4';
+      window.DEMO_VAD_MODE = 'push-to-talk';
+    </script>
     <script src="/shared.js"></script>
   </body>
 </html>

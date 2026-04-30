@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>APP CIAO | Simulazione Farmacia</title>
+    <title>APP CIAO | Traduttore — Flusso Continuo</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet" />
@@ -33,9 +33,52 @@
       }
       .nav-bar a:hover { color: var(--ink); border-color: var(--card-border); }
       .nav-bar a.active { color: var(--accent); border-color: var(--accent); background: rgba(124,249,204,0.08); }
+
+      /* Language direction indicator */
+      .lang-flow {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        margin-top: 20px;
+        padding: 12px 20px;
+        background: rgba(10, 18, 30, 0.6);
+        border: 1px solid var(--card-border);
+        border-radius: 12px;
+        font-family: var(--font-mono);
+        font-size: 0.78rem;
+        letter-spacing: 0.05em;
+        color: var(--muted);
+      }
+      .lang-chip {
+        padding: 4px 12px;
+        border-radius: 20px;
+        border: 1px solid;
+        font-weight: 600;
+      }
+      .lang-chip.native {
+        border-color: rgba(99,211,255,0.5);
+        color: #63d3ff;
+        background: rgba(99,211,255,0.07);
+      }
+      .lang-chip.italian {
+        border-color: rgba(124,249,204,0.5);
+        color: var(--accent);
+        background: rgba(124,249,204,0.07);
+      }
+      .lang-arrow {
+        color: var(--muted);
+        font-size: 1rem;
+      }
+      .lang-middle {
+        font-size: 0.72rem;
+        color: var(--muted);
+        text-align: center;
+      }
+
       .transcript-area {
         margin-top: 20px;
-        max-height: 220px;
+        max-height: 260px;
         overflow-y: auto;
         background: rgba(7,16,27,0.7);
         border: 1px solid var(--card-border);
@@ -56,17 +99,17 @@
     <main class="demo-shell">
       <nav class="nav-bar" aria-label="Demo navigation">
         <a href="/demo1.html">Demo 1 — Esercizi</a>
-        <a href="/demo2.html" class="active">Demo 2 — Farmacia</a>
+        <a href="/demo2.html">Demo 2 — Farmacia</a>
         <a href="/demo3.html">Demo 3 — Colloquio</a>
         <a href="/demo4_buttons.html">Demo 4A — Traduttore Pulsanti</a>
-        <a href="/demo4_flow.html">Demo 4B — Traduttore Flusso</a>
+        <a href="/demo4_flow.html" class="active">Demo 4B — Traduttore Flusso</a>
       </nav>
 
       <header class="hero">
         <p class="kicker">APP CIAO</p>
-        <h1>Simulazione di Vita — Farmacia</h1>
+        <h1>Traduzione — Flusso Continuo</h1>
         <p class="lead">
-          Parla con il farmacista in italiano. L'AI risponde al tuo intento e ti suggerisce frasi migliori in modo gentile.
+          Parla liberamente in italiano o nella tua lingua. L'AI ascolta in continuo e traduce automaticamente non appena smetti di parlare.
         </p>
       </header>
 
@@ -80,8 +123,8 @@
               </svg>
             </div>
             <div>
-              <p class="identity-label">Personaggio</p>
-              <p class="identity-title">Farmacista Italiano</p>
+              <p class="identity-label">Modalità</p>
+              <p class="identity-title">Traduttore Live Continuo</p>
             </div>
           </div>
           <div class="timer-chip" aria-label="Session duration">
@@ -123,23 +166,46 @@
         </div>
 
         <p class="status" id="status">Pronto</p>
-        <p class="hint" id="sessionHint">Premi <strong>Inizia Sessione</strong> e parla con il farmacista.</p>
+        <p class="hint" id="sessionHint">Premi <strong>Avvia Traduttore</strong> per iniziare la sessione.</p>
 
         <div class="actions">
-          <button id="startBtn" class="btn btn-primary">Inizia Sessione</button>
+          <button id="startBtn" class="btn btn-primary">Avvia Traduttore</button>
           <button id="stopBtn" class="btn btn-danger" disabled>Termina</button>
         </div>
 
+        <!-- Language direction indicator (populated by shared.js fetch to /api/ciao-config) -->
+        <div class="lang-flow" id="langFlow" aria-label="Direzioni di traduzione attive">
+          <span class="lang-chip native" id="nativeLangChip">…</span>
+          <span class="lang-arrow">⇄</span>
+          <span class="lang-chip italian">Italiano</span>
+        </div>
+
         <div class="transcript-area" id="transcriptArea" aria-live="polite">
-          <div id="transcriptEmpty" style="color:var(--muted);font-size:0.85rem;">La trascrizione apparirà qui...</div>
+          <div id="transcriptEmpty" style="color:var(--muted);font-size:0.85rem;">Le traduzioni appariranno qui...</div>
           <div id="transcriptLog"></div>
         </div>
       </section>
     </main>
 
+    <!-- Silero VAD for automatic speech detection -->
     <script src="/ort.min.js"></script>
     <script src="/vad.bundle.min.js"></script>
-    <script>window.DEMO_ID = 'demo_2';</script>
+    <script>
+      window.DEMO_ID = 'demo_4';
+      window.DEMO_VAD_MODE = 'continuous';
+
+      // Populate the native language chip once shared.js fetches config.
+      // shared.js sets window.USER_NATIVE_LANGUAGE after its own fetch;
+      // we also fetch here for the UI chip.
+      fetch('/api/ciao-config')
+        .then(r => r.json())
+        .then(cfg => {
+          const lang = cfg?.nativeLanguage || '…';
+          const chip = document.getElementById('nativeLangChip');
+          if (chip) chip.textContent = lang;
+        })
+        .catch(() => {});
+    </script>
     <script src="/shared.js"></script>
   </body>
 </html>

@@ -9,7 +9,13 @@
 (function () {
   // ── Config ─────────────────────────────────────────────────────────────────
   const DEMO_ID = window.DEMO_ID || 'demo_1';
-  const IS_WALKIE_TALKIE = DEMO_ID === 'demo_4';
+  // DEMO_VAD_MODE: 'push-to-talk' activates walkie-talkie buttons (demo4_buttons);
+  //               'continuous' uses Silero VAD (demo4_flow + demos 1-3).
+  // Falls back to legacy check so existing demo4.html still works unchanged.
+  const IS_WALKIE_TALKIE =
+    typeof window.DEMO_VAD_MODE !== 'undefined'
+      ? window.DEMO_VAD_MODE === 'push-to-talk'
+      : DEMO_ID === 'demo_4';
 
   const PLAYBACK_SAMPLE_RATE = 24000;
   const MIC_SAMPLE_RATE = 16000;
@@ -368,19 +374,11 @@
     wt_processor.onaudioprocess = (e) => {
       if (!wt_activeButton || !ws || ws.readyState !== WebSocket.OPEN) return;
       const float32 = e.inputBuffer.getChannelData(0);
-      let buf = Buffer.from(float32ToInt16(float32).buffer);
-
-      if (wt_pendingByte) {
-        buf = Buffer.concat([wt_pendingByte, buf]);
-        wt_pendingByte = null;
-      }
-      if (buf.byteLength % 2 !== 0) {
-        wt_pendingByte = buf.slice(buf.byteLength - 1);
-        buf = buf.slice(0, buf.byteLength - 1);
-      }
-      if (buf.byteLength === 0) return;
-
-      const b64 = arrayBufferToBase64(buf.buffer instanceof ArrayBuffer ? buf.buffer : buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+      // float32ToInt16 returns an Int16Array whose .buffer is always
+      // even-length (bufferSize=4096 samples × 2 bytes = 8192 bytes).
+      // We use pure TypedArray ops — no Node.js Buffer needed.
+      const int16 = float32ToInt16(float32);
+      const b64 = arrayBufferToBase64(int16.buffer);
       ws.send(JSON.stringify({ type: 'audio_chunk', data: b64 }));
     };
 
@@ -535,7 +533,8 @@
     if (DEMO_ID === 'demo_1') return 'Il tutor è pronto. Ascolta la frase e ripetila!';
     if (DEMO_ID === 'demo_2') return 'Il personaggio è pronto. Inizia la conversazione!';
     if (DEMO_ID === 'demo_3') return 'Il selezionatore è pronto. Presentati!';
-    if (DEMO_ID === 'demo_4') return 'Il traduttore è pronto. Tieni premuto il pulsante per parlare.';
+    if (DEMO_ID === 'demo_4' && IS_WALKIE_TALKIE) return 'Il traduttore è pronto. Tieni premuto un pulsante per parlare.';
+    if (DEMO_ID === 'demo_4' && !IS_WALKIE_TALKIE) return 'Il traduttore è pronto. Parla italiano o nella tua lingua — traduco automaticamente.';
     return 'Pronto.';
   }
 
@@ -579,7 +578,9 @@
         const lang = cfg?.nativeLanguage || 'Native';
         window.USER_NATIVE_LANGUAGE = lang;
         if (nativeSpeakBtn) {
-          nativeSpeakBtn.textContent = `Hold to speak ${lang}`;
+          // Update only the label span to preserve the SVG icon.
+          const labelEl = nativeSpeakBtn.querySelector('.wt-label');
+          if (labelEl) labelEl.textContent = `Hold to speak ${lang}`;
           nativeSpeakBtn.setAttribute('aria-label', `Hold to speak in ${lang}`);
         }
       })
