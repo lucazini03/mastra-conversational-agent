@@ -147,6 +147,19 @@
           <div id="transcriptEmpty" style="color:var(--muted);font-size:0.85rem;">La trascrizione apparirà qui...</div>
           <div id="transcriptLog"></div>
         </div>
+
+        <!-- Feedback mode: difficulty + trigger -->
+        <div class="feedback-bar">
+          <label for="difficultySelect">Livello feedback:</label>
+          <select id="difficultySelect">
+            <option value="easy">Facile (A1)</option>
+            <option value="medium">Medio (A2)</option>
+            <option value="hard">Difficile (B1)</option>
+          </select>
+          <button id="feedbackBtn" type="button" disabled>
+            Termina &amp; Ricevi Feedback
+          </button>
+        </div>
       </section>
     </main>
 

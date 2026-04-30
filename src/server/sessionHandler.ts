@@ -11,6 +11,7 @@
 //   Browser → Server  { type: 'text_prompt', text: string }
 //   Browser → Server  { type: 'language_spoken', language: string }  ← CIAO demo_4: hint for translator
 //   Browser → Server  { type: 'initiate_practice', transcript: Array<{role,text}>, difficulty: string }
+//   Browser → Server  { type: 'initiate_feedback', demoId: string, transcript: Array<{role,text}>, difficulty: string }
 //   Server  → Browser { type: 'transcript', role: 'user'|'model', text: string }
 //   Server  → Browser { type: 'vad_event', source: 'silero'|'gemini', message: string }
 //   Server  → Browser { type: 'status',     message: string }
@@ -18,6 +19,7 @@
 //   Server  → Browser { type: 'tts_audio',  data: string }    ← base64 Int16 PCM, 24kHz mono
 //   Server  → Browser { type: 'interview_feedback', markdown: string }
 //   Server  → Browser { type: 'practice_ready', context: object }
+//   Server  → Browser { type: 'feedback_ready', context: object, reviewDemoId: string }
 
 import { WebSocket, type RawData } from 'ws';
 import { rm } from 'node:fs/promises';
@@ -97,6 +99,10 @@ export class SessionHandler {
   // consumed once on the next start_session('demo_4_practice') call.
   private pendingPracticeContext: unknown | null = null;
 
+  // Stored feedback context: set when initiate_feedback extraction succeeds;
+  // consumed once on the next start_session('demo_N_review') call.
+  private pendingFeedbackContext: unknown | null = null;
+
   constructor(ws: WebSocket, sessionId: string, deps: SessionHandlerDeps) {
     this.ws = ws;
     this.sessionId = sessionId;
@@ -155,6 +161,7 @@ export class SessionHandler {
       transcript?: Array<{ role: string; text: string }>;
       difficulty?: string;
       practiceContext?: unknown;
+      feedbackContext?: unknown;
     };
     try {
       msg = JSON.parse(raw);
@@ -172,6 +179,10 @@ export class SessionHandler {
         // Client may pass back a practice context extracted in a prior session.
         if (msg.practiceContext !== undefined) {
           this.pendingPracticeContext = msg.practiceContext;
+        }
+        // Client may pass back a feedback context extracted in a prior session.
+        if (msg.feedbackContext !== undefined) {
+          this.pendingFeedbackContext = msg.feedbackContext;
         }
         await this.startSession(msg.documentConfigId);
         break;
@@ -285,6 +296,15 @@ export class SessionHandler {
         );
         break;
       }
+      case 'initiate_feedback': {
+        const reviewDemoId = typeof msg.demoId === 'string' ? `${msg.demoId}_review` : '';
+        await this.handleInitiateFeedback(
+          msg.transcript ?? [],
+          (msg.difficulty as 'easy' | 'medium' | 'hard' | undefined) ?? 'easy',
+          reviewDemoId,
+        );
+        break;
+      }
       default:
         console.warn(`[${this.sessionId}] Unknown message type: ${msg.type}`);
     }
@@ -325,6 +345,16 @@ export class SessionHandler {
     if (this.selectedAssistantId === 'demo_4_practice' && this.pendingPracticeContext) {
       practiceOpts.practiceContextJSON = this.pendingPracticeContext;
       this.pendingPracticeContext = null;
+    }
+    // Consume any stored feedback context (set by initiate_feedback flow).
+    if (
+      (this.selectedAssistantId === 'demo_1_review' ||
+        this.selectedAssistantId === 'demo_2_review' ||
+        this.selectedAssistantId === 'demo_3_review') &&
+      this.pendingFeedbackContext
+    ) {
+      practiceOpts.feedbackContextJSON = this.pendingFeedbackContext;
+      this.pendingFeedbackContext = null;
     }
 
     const contextFiles = uploadConfig?.contextFiles ?? [];
@@ -1266,6 +1296,102 @@ Extract the scenario summary, 3-5 key vocabulary items, and the conversation tur
       this.sendJSON({
         type: 'error',
         message: `Practice session preparation failed: ${message}`,
+      });
+    }
+  }
+
+  // ─── Feedback Session Extraction ─────────────────────────────────────────────
+  //
+  // Called when the browser sends { type: 'initiate_feedback' }.
+  // Uses the LLM model + generateObject to extract a structured FeedbackContext
+  // from the session transcript, then sends it back to the client as
+  // { type: 'feedback_ready' }.  The client closes the current WS and opens
+  // a new one (demoId: 'demo_N_review') passing back the context.
+
+  private async handleInitiateFeedback(
+    rawTranscript: Array<{ role: string; text: string }>,
+    difficulty: 'easy' | 'medium' | 'hard',
+    reviewDemoId: string,
+  ): Promise<void> {
+    if (rawTranscript.length === 0) {
+      this.sendJSON({
+        type: 'error',
+        message: 'Nessun trascritto disponibile per il feedback.',
+      });
+      return;
+    }
+
+    this.sendStatus('Preparing feedback...');
+    console.log(`[${this.sessionId}] Extracting feedback context from ${rawTranscript.length} transcript lines (review: ${reviewDemoId})...`);
+
+    const apiKey = process.env.GEMINI_LLM_API_KEY;
+    if (!apiKey) {
+      this.sendJSON({ type: 'error', message: 'API key not configured.' });
+      return;
+    }
+    const model = process.env.MEMORY_EXTRACTION_MODEL ?? 'gemini-2.0-flash-lite';
+
+    const FeedbackContextSchema = z.object({
+      overall_praise: z
+        .string()
+        .describe('A warm, positive summary of how the user did in the session. Must be encouraging.'),
+      phrases_to_practice: z
+        .array(
+          z.object({
+            user_attempt: z
+              .string()
+              .describe('What the user actually said (including mistakes or their native language).'),
+            correct_italian: z
+              .string()
+              .describe('The correct, natural, and simple Italian phrasing.'),
+            reason: z
+              .string()
+              .describe('Very brief reason for the correction.'),
+          }),
+        )
+        .max(3)
+        .describe('1 to 3 specific phrases the user struggled with and needs to practice.'),
+    });
+
+    const transcriptText = rawTranscript
+      .map(t => `[${t.role === 'user' ? 'LEARNER' : 'AI TUTOR'}]: ${t.text}`)
+      .join('\n');
+
+    const nativeLang = process.env.USER_NATIVE_LANGUAGE?.trim() || 'English';
+
+    try {
+      const google = createGoogleGenerativeAI({ apiKey });
+      const { object } = await generateObject({
+        model: google(model),
+        schema: FeedbackContextSchema,
+        prompt: `You are a language-learning analyst. The following is a transcript of an Italian language practice session between a migrant learner (native language: ${nativeLang}) and an AI tutor.
+
+Your task: extract a structured feedback object to be delivered in a follow-up session.
+
+TRANSCRIPT:
+${transcriptText}
+
+Provide:
+1. An "overall_praise" — a warm, encouraging summary of what the user did well. Be genuine and specific to what happened in the session.
+2. "phrases_to_practice" — at most 3 phrases where the user made a notable mistake (wrong verb conjugation, used their native language instead of Italian, wrong word order, etc.). For each, record exactly what they said, the correct Italian form, and a very brief explanation. Prioritize the most instructive errors.`,
+      });
+
+      this.pendingFeedbackContext = object;
+
+      console.log(`[${this.sessionId}] Feedback context extracted: ${object.phrases_to_practice.length} phrases to practice.`);
+
+      this.sendJSON({
+        type: 'feedback_ready',
+        context: object,
+        reviewDemoId,
+        difficulty,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[${this.sessionId}] Feedback extraction failed:`, message);
+      this.sendJSON({
+        type: 'error',
+        message: `Feedback preparation failed: ${message}`,
       });
     }
   }

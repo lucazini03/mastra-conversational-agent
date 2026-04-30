@@ -45,6 +45,9 @@
   const practiceBtn = document.getElementById('practiceBtn');
   const difficultySelect = document.getElementById('difficultySelect');
 
+  // Demo 1/2/3 feedback mode UI
+  const feedbackBtn = document.getElementById('feedbackBtn');
+
   // ── State ──────────────────────────────────────────────────────────────────
   let ws = null;
   let micVad = null;
@@ -73,6 +76,10 @@
   let transcriptLinesData = [];     // [{role, text}] accumulated during translation session
   let selectedDifficulty = 'easy'; // mirrors #difficultySelect value
   let pendingPracticeContext = null; // set when practice_ready arrives, consumed on ws.onclose
+
+  // Demo 1/2/3 feedback session state
+  let pendingFeedbackContext = null;  // set when feedback_ready arrives, consumed on ws.onclose
+  let pendingFeedbackDemoId = null;   // review demoId (e.g. 'demo_1_review') from feedback_ready
 
   // ── Robot animation ──────────────────────────────────────────────────────
   function setRobotSpeaking(speaking) {
@@ -177,8 +184,9 @@
     const result = createTranscriptLine(role, normalizedText);
     lastTranscriptEntry = { role, text: normalizedText, at: now, wrap: result?.wrap, bodyEl: result?.body };
 
-    // Accumulate transcript for demo_4 practice feature.
-    if (DEMO_ID === 'demo_4' || DEMO_ID === 'demo_4_practice') {
+    // Accumulate transcript for practice/feedback features.
+    if (DEMO_ID === 'demo_4' || DEMO_ID === 'demo_4_practice' ||
+        DEMO_ID === 'demo_1' || DEMO_ID === 'demo_2' || DEMO_ID === 'demo_3') {
       transcriptLinesData.push({ role, text: normalizedText });
     }
   }
@@ -472,6 +480,42 @@
     attachCommonWsHandlers(ws);
   }
 
+  // ── Feedback session (demo_1/2/3 review) ──────────────────────────────────
+  async function startFeedbackSession(context, reviewDemoId, difficulty) {
+    if (ws) return; // already have a session open
+    transcriptLinesData = []; // reset for the new session
+    sessionReady = false;
+    setDisabled(startBtn, true);
+    setDisabled(feedbackBtn, true);
+    setStatus('Connessione feedback...', '');
+    setHint('Avvio sessione di feedback in italiano...');
+
+    const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(`${scheme}//${window.location.host}`);
+    ws.binaryType = 'arraybuffer';
+
+    ws.onopen = async () => {
+      try {
+        await startMicCapture();
+        ws.send(JSON.stringify({
+          type: 'start_session',
+          demoId: reviewDemoId,
+          feedbackContext: context,
+        }));
+        startConversationTimer();
+        setDisabled(stopBtn, false);
+        setHint('Sessione di feedback attiva. Ascolta il tutor...');
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setStatus('Errore microfono', 'error');
+        setHint(`Microfono non disponibile: ${msg}`);
+        stopSession();
+      }
+    };
+
+    attachCommonWsHandlers(ws);
+  }
+
   // ── Session lifecycle ──────────────────────────────────────────────────────
 
   // Shared WS message/error/close handlers — used by both startSession and startPracticeSession.
@@ -489,6 +533,8 @@
           setHint(getReadyHint());
           // Enable practice button once session is live (demo_4 translation only)
           if (DEMO_ID === 'demo_4') setDisabled(practiceBtn, false);
+          // Enable feedback button once session is live (demo_1 / demo_2 / demo_3)
+          if (DEMO_ID === 'demo_1' || DEMO_ID === 'demo_2' || DEMO_ID === 'demo_3') setDisabled(feedbackBtn, false);
         } else if (txt.includes('Connection restored')) {
           setStatus('Connesso', 'connected');
         } else if (!txt.includes('Reconnecting') && !txt.includes('Optimizing')) {
@@ -536,6 +582,21 @@
         setHint('Sessione di traduzione terminata. Avvio sessione di pratica...');
         selectedDifficulty = diff;
       }
+
+      if (msg.type === 'feedback_ready') {
+        // Server has extracted the feedback context. Store it so that onclose
+        // can start the review session after the WS fully closes.
+        pendingFeedbackContext = msg.context ?? null;
+        pendingFeedbackDemoId = msg.reviewDemoId ?? null;
+        const diff = msg.difficulty ?? selectedDifficulty;
+        // Cleanly end the current session.
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'end_session' }));
+        }
+        setStatus('Avvio feedback...', 'connected');
+        setHint('Sessione terminata. Avvio sessione di feedback...');
+        selectedDifficulty = diff;
+      }
     };
 
     socket.onerror = () => {
@@ -555,6 +616,18 @@
       setDisabled(stopBtn, true);
       if (IS_WALKIE_TALKIE) setWalkieTalkieButtonsDisabled(true);
       setDisabled(practiceBtn, true);
+      setDisabled(feedbackBtn, true);
+
+      // If a feedback_ready message arrived before close, auto-start feedback session.
+      if (pendingFeedbackContext) {
+        const ctx = pendingFeedbackContext;
+        const reviewId = pendingFeedbackDemoId;
+        const diff = selectedDifficulty;
+        pendingFeedbackContext = null;
+        pendingFeedbackDemoId = null;
+        void startFeedbackSession(ctx, reviewId, diff);
+        return;
+      }
 
       // If a practice_ready message arrived before close, auto-start practice session.
       if (pendingPracticeContext) {
@@ -653,6 +726,20 @@
     setHint('Estrazione del contesto di pratica dalla conversazione...');
     ws.send(JSON.stringify({
       type: 'initiate_practice',
+      transcript: transcriptLinesData,
+      difficulty: selectedDifficulty,
+    }));
+  });
+
+  // Feedback button (demo_1 / demo_2 / demo_3)
+  feedbackBtn?.addEventListener('click', () => {
+    if (!ws || ws.readyState !== WebSocket.OPEN || !sessionReady) return;
+    setDisabled(feedbackBtn, true);
+    setStatus('Analisi conversazione...', 'connected');
+    setHint('Estrazione del contesto di feedback dalla conversazione...');
+    ws.send(JSON.stringify({
+      type: 'initiate_feedback',
+      demoId: DEMO_ID,
       transcript: transcriptLinesData,
       difficulty: selectedDifficulty,
     }));

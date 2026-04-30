@@ -1,0 +1,650 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pronuncia Italiano — Feedback Audio</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600&family=Noto+Sans:wght@400;500&display=swap');
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --surface2: #21262d;
+    --border: #30363d;
+    --accent: #3fb950;
+    --accent-dim: #1a3d25;
+    --accent2: #58a6ff;
+    --accent2-dim: #0d2b4e;
+    --danger: #f85149;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --radius: 10px;
+    --font: 'Sora', sans-serif;
+    --font-body: 'Noto Sans', sans-serif;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-body);
+    min-height: 100vh;
+    padding: 2rem 1rem;
+  }
+
+  .container {
+    max-width: 760px;
+    margin: 0 auto;
+  }
+
+  header {
+    text-align: center;
+    margin-bottom: 2.5rem;
+  }
+
+  header h1 {
+    font-family: var(--font);
+    font-size: 1.8rem;
+    font-weight: 600;
+    color: var(--text);
+    letter-spacing: -0.02em;
+  }
+
+  header p {
+    color: var(--muted);
+    font-size: 0.9rem;
+    margin-top: 0.4rem;
+  }
+
+  .flag { font-size: 1.5rem; margin-right: 8px; }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1.5rem;
+    margin-bottom: 1.25rem;
+  }
+
+  .card-label {
+    font-family: var(--font);
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 1rem;
+  }
+
+  .controls {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  button {
+    font-family: var(--font);
+    font-size: 0.85rem;
+    font-weight: 500;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.55rem 1.1rem;
+    cursor: pointer;
+    transition: all 0.15s;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  #btn-record {
+    background: var(--accent-dim);
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  #btn-record:hover { background: #224d2e; }
+  #btn-record.recording { background: #3d1a1a; border-color: var(--danger); color: var(--danger); }
+
+  #btn-stop {
+    background: var(--surface2);
+    color: var(--muted);
+  }
+
+  #btn-stop:hover:not(:disabled) { border-color: var(--muted); color: var(--text); }
+  #btn-stop:disabled { opacity: 0.35; cursor: not-allowed; }
+
+  #btn-analyze {
+    background: var(--accent2-dim);
+    border-color: var(--accent2);
+    color: var(--accent2);
+    margin-left: auto;
+  }
+
+  #btn-analyze:hover:not(:disabled) { background: #0d3466; }
+  #btn-analyze:disabled { opacity: 0.35; cursor: not-allowed; }
+
+  .status-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0.6rem 0.8rem;
+    border-radius: 6px;
+    font-size: 0.82rem;
+    color: var(--muted);
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    margin-top: 0.75rem;
+  }
+
+  .dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--muted);
+    flex-shrink: 0;
+  }
+
+  .dot.recording { background: var(--danger); animation: pulse 1s infinite; }
+  .dot.ready { background: var(--accent); }
+  .dot.thinking { background: var(--accent2); animation: pulse 0.8s infinite; }
+
+  @keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:0.3 } }
+
+  .waveform {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    height: 36px;
+    margin-top: 0.75rem;
+    padding: 0 4px;
+  }
+
+  .waveform-bar {
+    width: 3px;
+    border-radius: 2px;
+    background: var(--accent);
+    opacity: 0.5;
+    transition: height 0.05s;
+    min-height: 3px;
+  }
+
+  audio {
+    width: 100%;
+    margin-top: 0.75rem;
+    border-radius: 6px;
+    filter: invert(1) hue-rotate(180deg) brightness(0.8);
+  }
+
+  .lang-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+
+  select, input[type="text"] {
+    font-family: var(--font-body);
+    font-size: 0.85rem;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 0.5rem 0.75rem;
+    width: 100%;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+
+  select:focus, input:focus { border-color: var(--accent2); }
+
+  label { font-size: 0.8rem; color: var(--muted); display: block; margin-bottom: 5px; }
+
+  .feedback-box {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1.5rem;
+    display: none;
+  }
+
+  .feedback-box.visible { display: block; }
+
+  .feedback-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 1.25rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .score-badge {
+    font-family: var(--font);
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: var(--accent);
+    min-width: 52px;
+    text-align: center;
+    background: var(--accent-dim);
+    border: 1px solid var(--accent);
+    border-radius: 8px;
+    padding: 4px 10px;
+  }
+
+  .feedback-title {
+    font-family: var(--font);
+    font-size: 1rem;
+    font-weight: 500;
+  }
+
+  .feedback-subtitle {
+    font-size: 0.8rem;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+
+  .feedback-content {
+    font-size: 0.88rem;
+    line-height: 1.75;
+    color: #cdd5e0;
+    white-space: pre-wrap;
+  }
+
+  .tag-row {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 1rem;
+  }
+
+  .tag {
+    font-size: 0.72rem;
+    font-family: var(--font);
+    padding: 3px 9px;
+    border-radius: 20px;
+    border: 1px solid;
+  }
+
+  .tag.good { border-color: var(--accent); color: var(--accent); background: var(--accent-dim); }
+  .tag.warn { border-color: #e3b341; color: #e3b341; background: #2d1f03; }
+  .tag.info { border-color: var(--accent2); color: var(--accent2); background: var(--accent2-dim); }
+
+  .spinner {
+    display: inline-block;
+    width: 14px; height: 14px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent2);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    flex-shrink: 0;
+  }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .error-msg {
+    background: #2d1a1a;
+    border: 1px solid var(--danger);
+    color: var(--danger);
+    border-radius: 6px;
+    padding: 0.75rem 1rem;
+    font-size: 0.83rem;
+    margin-top: 0.75rem;
+    display: none;
+  }
+
+  .chunks-indicator {
+    font-size: 0.78rem;
+    color: var(--muted);
+    margin-top: 4px;
+  }
+
+  .divider {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 1.5rem 0;
+  }
+
+  @media (max-width: 500px) {
+    .lang-grid { grid-template-columns: 1fr; }
+    #btn-analyze { margin-left: 0; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1><span class="flag">🇮🇹</span>Pronuncia Italiano</h1>
+    <p>Registra la tua voce — ricevi un feedback personalizzato sulla pronuncia</p>
+  </header>
+
+  <div class="card">
+    <div class="card-label">Lingua nativa & contesto</div>
+    <div class="lang-grid">
+      <div>
+        <label for="native-lang">La tua lingua madre</label>
+        <select id="native-lang">
+          <option value="francese (africano)">Francese (Africa francofona)</option>
+          <option value="arabo">Arabo</option>
+          <option value="wolof">Wolof</option>
+          <option value="bambara">Bambara</option>
+          <option value="hausa">Hausa</option>
+          <option value="swahili">Swahili</option>
+          <option value="amarico">Amarico</option>
+          <option value="tigrino">Tigrino</option>
+          <option value="somalo">Somalo</option>
+          <option value="lingala">Lingala</option>
+          <option value="yoruba">Yorùbá</option>
+          <option value="igbo">Igbo</option>
+          <option value="fula">Fula / Peul</option>
+          <option value="portoghese (africano)">Portoghese (PALOP)</option>
+          <option value="altro">Altra lingua</option>
+        </select>
+      </div>
+      <div>
+        <label for="level">Livello italiano</label>
+        <select id="level">
+          <option value="principiante assoluto">Principiante (A1)</option>
+          <option value="elementare">Elementare (A2)</option>
+          <option value="intermedio" selected>Intermedio (B1)</option>
+          <option value="intermedio superiore">Intermedio sup. (B2)</option>
+          <option value="avanzato">Avanzato (C1/C2)</option>
+        </select>
+      </div>
+    </div>
+    <div style="margin-top: 12px;">
+      <label for="topic-hint">Cosa ha detto lo studente? (opzionale — aiuta l'analisi)</label>
+      <input type="text" id="topic-hint" placeholder="es. 'Si è presentato e ha descritto la famiglia'">
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-label">Registrazione</div>
+    <div class="controls">
+      <button id="btn-record">
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><circle cx="6" cy="6" r="6"/></svg>
+        Registra
+      </button>
+      <button id="btn-stop" disabled>
+        <svg width="11" height="11" viewBox="0 0 11 11" fill="currentColor"><rect width="11" height="11" rx="2"/></svg>
+        Ferma
+      </button>
+      <button id="btn-analyze" disabled>
+        Analizza pronuncia ✦
+      </button>
+    </div>
+    <div class="waveform" id="waveform"></div>
+    <div class="status-bar">
+      <div class="dot" id="status-dot"></div>
+      <span id="status-text">Premi "Registra" per iniziare</span>
+    </div>
+    <div class="chunks-indicator" id="chunks-info"></div>
+    <div class="error-msg" id="error-msg"></div>
+    <audio id="audio-preview" controls style="display:none;"></audio>
+  </div>
+
+  <div class="feedback-box" id="feedback-box">
+    <div class="feedback-header">
+      <div class="score-badge" id="score-badge">—</div>
+      <div>
+        <div class="feedback-title" id="feedback-title">Analisi in corso…</div>
+        <div class="feedback-subtitle" id="feedback-subtitle"></div>
+      </div>
+    </div>
+    <div class="feedback-content" id="feedback-content"></div>
+    <div class="tag-row" id="tag-row"></div>
+  </div>
+</div>
+
+<script>
+const GEMINI_KEY = 'AIzaSyB4OdDekRdi-WHuckMyEzq89DgG4nK0FE0';
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=${GEMINI_KEY}`;
+
+let mediaRecorder = null;
+let audioChunks = [];
+let audioBlob = null;
+let analyserNode = null;
+let animFrameId = null;
+let audioContext = null;
+let stream = null;
+
+const btnRecord = document.getElementById('btn-record');
+const btnStop = document.getElementById('btn-stop');
+const btnAnalyze = document.getElementById('btn-analyze');
+const statusDot = document.getElementById('status-dot');
+const statusText = document.getElementById('status-text');
+const audioPreview = document.getElementById('audio-preview');
+const feedbackBox = document.getElementById('feedback-box');
+const errorMsg = document.getElementById('error-msg');
+const waveformEl = document.getElementById('waveform');
+const chunksInfo = document.getElementById('chunks-info');
+
+const BARS = 48;
+for (let i = 0; i < BARS; i++) {
+  const b = document.createElement('div');
+  b.className = 'waveform-bar';
+  b.style.height = '3px';
+  waveformEl.appendChild(b);
+}
+const bars = waveformEl.querySelectorAll('.waveform-bar');
+
+function setStatus(label, dotClass, extraText) {
+  statusText.textContent = label;
+  statusDot.className = 'dot ' + (dotClass || '');
+  chunksInfo.textContent = extraText || '';
+}
+
+function showError(msg) {
+  errorMsg.textContent = msg;
+  errorMsg.style.display = 'block';
+}
+
+function hideError() { errorMsg.style.display = 'none'; }
+
+function drawWaveform(dataArray) {
+  const step = Math.floor(dataArray.length / BARS);
+  bars.forEach((bar, i) => {
+    const val = dataArray[i * step] || 0;
+    const h = Math.max(3, (val / 255) * 34);
+    bar.style.height = h + 'px';
+    bar.style.opacity = 0.4 + (val / 255) * 0.6;
+  });
+}
+
+function animateWaveform() {
+  if (!analyserNode) return;
+  const data = new Uint8Array(analyserNode.frequencyBinCount);
+  analyserNode.getByteFrequencyData(data);
+  drawWaveform(data);
+  animFrameId = requestAnimationFrame(animateWaveform);
+}
+
+function stopWaveform() {
+  cancelAnimationFrame(animFrameId);
+  bars.forEach(b => { b.style.height = '3px'; b.style.opacity = '0.5'; });
+}
+
+btnRecord.addEventListener('click', async () => {
+  hideError();
+  audioChunks = [];
+  audioBlob = null;
+  audioPreview.style.display = 'none';
+  feedbackBox.classList.remove('visible');
+  btnAnalyze.disabled = true;
+
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+  } catch (e) {
+    showError('Impossibile accedere al microfono. Controlla i permessi del browser.');
+    return;
+  }
+
+  audioContext = new AudioContext();
+  const source = audioContext.createMediaStreamSource(stream);
+  analyserNode = audioContext.createAnalyser();
+  analyserNode.fftSize = 256;
+  source.connect(analyserNode);
+
+  const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+    ? 'audio/webm;codecs=opus'
+    : MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')
+    ? 'audio/ogg;codecs=opus'
+    : 'audio/webm';
+
+  mediaRecorder = new MediaRecorder(stream, { mimeType });
+  mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
+  mediaRecorder.onstop = () => {
+    audioBlob = new Blob(audioChunks, { type: mimeType });
+    const url = URL.createObjectURL(audioBlob);
+    audioPreview.src = url;
+    audioPreview.style.display = 'block';
+    setStatus('Registrazione completata — pronto per l\'analisi', 'ready', `${audioChunks.length} segmenti audio · ${(audioBlob.size / 1024).toFixed(0)} KB`);
+    btnAnalyze.disabled = false;
+    stopWaveform();
+    stream.getTracks().forEach(t => t.stop());
+  };
+
+  mediaRecorder.start(250);
+  btnRecord.classList.add('recording');
+  btnRecord.disabled = true;
+  btnStop.disabled = false;
+  setStatus('Registrazione in corso…', 'recording', '');
+  animateWaveform();
+});
+
+btnStop.addEventListener('click', () => {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    mediaRecorder.stop();
+  }
+  btnRecord.classList.remove('recording');
+  btnRecord.disabled = false;
+  btnStop.disabled = true;
+});
+
+btnAnalyze.addEventListener('click', async () => {
+  if (!audioBlob) return;
+  hideError();
+  feedbackBox.classList.remove('visible');
+  btnAnalyze.disabled = true;
+  setStatus('Invio audio a Gemini…', 'thinking', 'Elaborazione in corso…');
+
+  const nativeLang = document.getElementById('native-lang').value;
+  const level = document.getElementById('level').value;
+  const hint = document.getElementById('topic-hint').value.trim();
+
+  try {
+    const base64 = await blobToBase64(audioBlob);
+    const mimeType = audioBlob.type.split(';')[0];
+
+    const systemPrompt = `Sei un analizzatore di pronuncia italiana. Ascolta l'audio e identifica gli errori di pronuncia.
+Lo studente parla ${nativeLang} come lingua madre. Livello italiano: ${level}.
+${hint ? `Contesto: ${hint}.` : ''}
+
+Rispondi SOLO in italiano. Non usare simboli fonetici (IPA). Scrivi come se spiegassi a un insegnante di italiano che non conosce la linguistica.
+
+Struttura la risposta esattamente così:
+
+**PUNTEGGIO COMPLESSIVO**: [numero da 1 a 10]
+
+**ERRORI RILEVATI**
+Per ogni errore:
+- Parola/suono: [parola o suono sbagliato]
+  Come dovrebbe suonare: [descrizione semplice del suono corretto in italiano]
+  Come lo pronuncia lo studente: [descrizione semplice di ciò che si sente]
+  Motivo probabile: [in una frase, perché succede — riferendosi alla lingua madre]
+
+**ERRORI RICORRENTI**
+(elenco puntato: quali errori si ripetono più volte, descritti in modo semplice)
+
+**PUNTEGGIO PER AREA**
+- Consonanti: X/10
+- Vocali: X/10
+- Ritmo e melodia della frase: X/10
+- Doppie consonanti: X/10 (o "non presente nel campione")
+
+Non aggiungere consigli, incoraggiamenti o testo libero. Solo i blocchi sopra.`;
+
+    const body = {
+      contents: [{
+        parts: [
+          { text: systemPrompt },
+          { inline_data: { mime_type: mimeType, data: base64 } }
+        ]
+      }],
+      generationConfig: { temperature: 0.7, maxOutputTokens: 4096 }
+    };
+
+    const res = await fetch(GEMINI_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error?.message || `HTTP ${res.status}`);
+    }
+
+    const data = await res.json();
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+
+    if (!text) throw new Error('Risposta vuota da Gemini.');
+
+    renderFeedback(text);
+    setStatus('Analisi completata', 'ready', '');
+  } catch (e) {
+    showError('Errore durante l\'analisi: ' + e.message);
+    setStatus('Errore — riprova', '', '');
+    btnAnalyze.disabled = false;
+  }
+});
+
+function renderFeedback(text) {
+  feedbackBox.classList.add('visible');
+
+  const scoreMatch = text.match(/PUNTEGGIO[^:]*:\s*(\d+(?:[.,]\d+)?)/i);
+  const score = scoreMatch ? scoreMatch[1] : '—';
+  document.getElementById('score-badge').textContent = score + '/10';
+
+  const scoreNum = parseFloat(score.replace(',', '.'));
+  const badge = document.getElementById('score-badge');
+  if (scoreNum >= 7) { badge.style.color = '#3fb950'; badge.style.borderColor = '#3fb950'; badge.style.background = '#1a3d25'; }
+  else if (scoreNum >= 5) { badge.style.color = '#e3b341'; badge.style.borderColor = '#e3b341'; badge.style.background = '#2d1f03'; }
+  else { badge.style.color = '#f85149'; badge.style.borderColor = '#f85149'; badge.style.background = '#2d1a1a'; }
+
+  document.getElementById('feedback-title').textContent = 'Analisi fonologica';
+  document.getElementById('feedback-subtitle').textContent = 'Errori di pronuncia rilevati — output grezzo (test interno)';
+
+  const clean = text
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\*([^*]+)\*/g, '$1');
+  document.getElementById('feedback-content').textContent = clean;
+
+  const tagRow = document.getElementById('tag-row');
+  tagRow.innerHTML = '';
+  const tags = [
+    { label: 'Pronuncia', cls: 'info' },
+    { label: 'Grammatica', cls: 'warn' },
+    { label: 'Fluidità', cls: 'info' },
+    { label: 'Gemini 1.5 Pro', cls: 'good' },
+    { label: 'Audio nativo', cls: 'good' }
+  ];
+  tags.forEach(t => {
+    const el = document.createElement('span');
+    el.className = 'tag ' + t.cls;
+    el.textContent = t.label;
+    tagRow.appendChild(el);
+  });
+}
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result.split(',')[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+</script>
+</body>
+</html>
