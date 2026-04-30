@@ -5,10 +5,11 @@
 //   Browser mic PCM → GeminiLive → Browser speaker PCM
 //
 // Protocol (all text frames, JSON):
-//   Browser → Server  { type: 'start_session', documentConfigId?: string }
+//   Browser → Server  { type: 'start_session', documentConfigId?: string, demoId?: string }
 //   Browser → Server  { type: 'end_session' }
 //   Browser → Server  { type: 'audio_chunk', data: string }   ← base64 Int16 PCM, 16kHz mono
 //   Browser → Server  { type: 'text_prompt', text: string }
+//   Browser → Server  { type: 'language_spoken', language: string }  ← CIAO demo_4: hint for translator
 //   Server  → Browser { type: 'transcript', role: 'user'|'model', text: string }
 //   Server  → Browser { type: 'vad_event', source: 'silero'|'gemini', message: string }
 //   Server  → Browser { type: 'status',     message: string }
@@ -24,7 +25,13 @@ import { createInterviewAgent, type InterviewAgent } from '../agent/agentFactory
 import {
   DEFAULT_ASSISTANT_ID,
   INTERVIEW_COACH_PROMPT,
+  CIAO_DEMO_LABELS,
+  CIAO_DEMO_OPENING_PROMPTS,
+  getDemoPrompt,
+  isCiaoAssistantId,
   type AssistantId,
+  type CiaoAssistantId,
+  type AnyDemoId,
 } from '../config/interviewConfig.js';
 import { documentService, type InterviewStructure } from './documentService.js';
 import { SessionCostTracker } from './sessionCostTracker.js';
@@ -58,7 +65,7 @@ export class SessionHandler {
   private isContextSwitching = false;
   private costTracker = new SessionCostTracker();
   private sessionCostSummarySent = false;
-  private selectedAssistantId: AssistantId = DEFAULT_ASSISTANT_ID;
+  private selectedAssistantId: AnyDemoId = DEFAULT_ASSISTANT_ID;
   private uploadedDocumentDir: string | null = null;
   private readonly deps: SessionHandlerDeps;
 
@@ -135,6 +142,8 @@ export class SessionHandler {
       data?: string;
       text?: string;
       documentConfigId?: string;
+      demoId?: string;
+      language?: string;
     };
     try {
       msg = JSON.parse(raw);
@@ -144,10 +153,14 @@ export class SessionHandler {
     }
 
     switch (msg.type) {
-      case 'start_session':
-        this.selectedAssistantId = DEFAULT_ASSISTANT_ID;
+      case 'start_session': {
+        const rawDemoId = typeof msg.demoId === 'string' ? msg.demoId.trim() : '';
+        this.selectedAssistantId = isCiaoAssistantId(rawDemoId)
+          ? rawDemoId
+          : DEFAULT_ASSISTANT_ID;
         await this.startSession(msg.documentConfigId);
         break;
+      }
       case 'end_session':
         this.intentionalClose = true;
         await this.generateAndSendFeedback();
@@ -243,6 +256,13 @@ export class SessionHandler {
         }
         break;
       }
+      case 'language_spoken': {
+        // CIAO demo_4: informational hint about which language button was pressed.
+        // The system prompt drives translation behaviour; this is logged for diagnostics.
+        const lang = String(msg.language ?? 'unknown');
+        console.log(`[${this.sessionId}] language_spoken hint: ${lang}`);
+        break;
+      }
       default:
         console.warn(`[${this.sessionId}] Unknown message type: ${msg.type}`);
     }
@@ -275,8 +295,13 @@ export class SessionHandler {
     this.feedbackSent = false;
     this.jobDescriptionText = null;
 
+    // ── CIAO demos: use the demo-specific system prompt, no doc upload needed ──
+    const isCiaoDemo = isCiaoAssistantId(this.selectedAssistantId);
+
     const contextFiles = uploadConfig?.contextFiles ?? [];
-    let instructions = INTERVIEW_COACH_PROMPT;
+    let instructions = isCiaoDemo
+      ? getDemoPrompt(this.selectedAssistantId as CiaoAssistantId)
+      : INTERVIEW_COACH_PROMPT;
     const initialState: AnyAssistantState = {
       behavioral_directives: [],
       user_language: '',
@@ -286,7 +311,7 @@ export class SessionHandler {
       overall_impression: '',
     } as AnyAssistantState;
 
-    if (contextFiles.length > 0) {
+    if (!isCiaoDemo && contextFiles.length > 0) {
       try {
         const docs = await documentService.getDocumentsHashAndText(contextFiles);
         if (docs.text.trim().length > 0) {
@@ -315,7 +340,11 @@ export class SessionHandler {
 
     this.contextManager = new ContextManager({
       sessionId: this.sessionId,
-      assistantId: this.selectedAssistantId,
+      // ContextManager's assistantId drives schema selection for memory compaction.
+      // CIAO demos reuse the interview_coach schema (generic state shape).
+      assistantId: isCiaoAssistantId(this.selectedAssistantId)
+        ? DEFAULT_ASSISTANT_ID
+        : (this.selectedAssistantId as AssistantId),
       baseSystemPrompt: instructions,
     });
     this.contextManager.setInitialState(initialState);
@@ -1063,6 +1092,8 @@ export class SessionHandler {
   }
 
   private async generateAndSendFeedback(): Promise<void> {
+    // Feedback generation only applies to the interview coach demo.
+    if (isCiaoAssistantId(this.selectedAssistantId)) return;
     if (this.feedbackSent || this.transcriptLines.length === 0) return;
     this.feedbackSent = true;
 
@@ -1101,11 +1132,17 @@ export class SessionHandler {
     this.sendJSON({ type: 'status', message });
   }
 
-  private getAssistantLabel(_assistantId: AssistantId): string {
+  private getAssistantLabel(assistantId: AnyDemoId): string {
+    if (isCiaoAssistantId(assistantId)) {
+      return CIAO_DEMO_LABELS[assistantId];
+    }
     return 'Interview Coach';
   }
 
-  private getOpeningPrompt(_assistantId: AssistantId): string {
+  private getOpeningPrompt(assistantId: AnyDemoId): string {
+    if (isCiaoAssistantId(assistantId)) {
+      return CIAO_DEMO_OPENING_PROMPTS[assistantId];
+    }
     const roleTitle = this.interviewStructure?.role_title ?? 'the position';
     return `Greet the candidate warmly, introduce yourself as their interviewer for the ${roleTitle} role, and ask only for their name to get started. Do not ask what role they are applying for.`;
   }

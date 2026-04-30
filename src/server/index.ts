@@ -66,6 +66,13 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// Expose non-sensitive client configuration so demo pages can adapt the UI.
+app.get('/api/ciao-config', (_req, res) => {
+  res.json({
+    nativeLanguage: process.env.USER_NATIVE_LANGUAGE?.trim() || 'English',
+  });
+});
+
 app.post(
   '/api/document-config',
   upload.fields([{ name: 'contextDocument', maxCount: 1 }]),
