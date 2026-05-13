@@ -65,7 +65,20 @@ import type { AssistantId } from '@/src/config/professorConfig';
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const GEMINI_WS_BASE =
-  'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent';
+  'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService';
+
+/** Build the correct WS URL depending on whether token is a raw API key or ephemeral token.
+ *  Ephemeral tokens (name starts with 'auth_tokens/') MUST use:
+ *    BidiGenerateContentConstrained + ?access_token=<name>  (no URL encoding)
+ *  Regular API keys use:
+ *    BidiGenerateContent + ?key=<apiKey>
+ */
+function buildWsUrl(token: string): string {
+  if (token.startsWith('auth_tokens/')) {
+    return `${GEMINI_WS_BASE}.BidiGenerateContentConstrained?access_token=${token}`;
+  }
+  return `${GEMINI_WS_BASE}.BidiGenerateContent?key=${encodeURIComponent(token)}`;
+}
 
 const MIC_SAMPLE_RATE = 16000;
 const PLAYBACK_SAMPLE_RATE = 24000;
@@ -510,7 +523,7 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
    */
   async function connectGemini(token: string, isSwitch = false): Promise<void> {
     return new Promise((resolve, reject) => {
-      const url = `${GEMINI_WS_BASE}?key=${encodeURIComponent(token)}`;
+      const url = buildWsUrl(token);
       const ws = new WebSocket(url);
       wsRef.current = ws;
 

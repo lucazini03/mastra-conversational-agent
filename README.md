@@ -17,6 +17,8 @@
 11. [Altre personalità assistant](#11-altre-personalità-assistant)
 12. [Avvio del progetto](#12-avvio-del-progetto)
 13. [Struttura del repository](#13-struttura-del-repository)
+14. [Architettura Client Orchestrator (Serverless)](#14-architettura-client-orchestrator-serverless)
+15. [Flussi Scenario End-to-End](#15-flussi-scenario-end-to-end)
 
 ---
 
@@ -490,4 +492,209 @@ logs/
    uploads/                   - File upload temporanei (gitignored)
 rag-docs/                    - (Opzionale) documenti RAG pre-posizionati
 ```
+
+---
+
+## 14. Architettura Client Orchestrator (Serverless)
+
+Questa sezione descrive la versione refactor serverless (Next.js + API routes), dove il browser mantiene la sessione realtime con Gemini Live e il backend esegue solo logica stateless su richiesta HTTP.
+
+### 14.1 `hooks/` (Frontend Orchestrator)
+
+#### `hooks/useGeminiLive.ts`
+
+Ruolo: controller principale client-side della sessione realtime.
+
+Responsabilita principali:
+
+- **Data Plane (audio):** apre una WebSocket diretta verso `wss://generativelanguage.googleapis.com`, cattura audio dal microfono via Web Audio API e invia chunk PCM.
+- **VAD locale:** usa gli asset in `public/` (Silero + ONNX Runtime) per rilevare inizio/fine parlato e inviare segnali `activityStart` / `activityEnd`.
+- **Compaction trigger:** osserva `usageMetadata`; quando supera la soglia token, mette in pausa la pipeline, drena/bufferizza audio in transito e invia una POST a `app/api/voice/compact/route.ts`.
+- **Tool calling dal client:** intercetta i frame `toolCall` (es. ricerca documentale), chiama endpoint `app/api/...` e reinvia il `toolResponse` a Gemini.
+
+In breve: `useGeminiLive.ts` e il punto di convergenza tra UI React, audio realtime, tool calls e API serverless.
+
+### 14.2 `app/` (UI + Control Plane serverless)
+
+#### `app/page.tsx` e `app/layout.tsx`
+
+Ruolo: UI React (trascrizione, stato ascolto/parlato, controlli sessione), mounting dell'hook `useGeminiLive`.
+
+#### `app/api/voice/token/route.ts`
+
+Ruolo: endpoint stateless di autenticazione per la sessione realtime.
+
+Flusso:
+
+- chiamato da `useGeminiLive.ts` all'avvio o durante uno switch di contesto,
+- usa `@google/genai` lato server per emettere un token effimero,
+- restituisce il token al client che apre/riapre la WS diretta a Google.
+
+#### `app/api/voice/compact/route.ts`
+
+Ruolo: endpoint di context compaction.
+
+Flusso:
+
+- riceve transcript/stato dalla sessione client,
+- invoca `src/services/contextManager/contextManager.ts`,
+- restituisce `nextSystemInstruction` (stato compatto + direttive) da usare nel successivo setup della WS.
+
+#### `app/api/document-config/route.ts` e `app/api/document-config/*`
+
+Ruolo: gestione configurazione documenti/sessione e upload/config necessari al RAG.
+
+Flusso:
+
+- salva/legge configurazioni di sessione tramite `src/server/documentConfigStore.ts`,
+- innesca logica documentale (`src/server/documentService.ts`, `src/server/documentFileUtils.ts`) e, quando richiesto, ricerche RAG con `src/server/ragService.ts`.
+
+### 14.3 `src/` (Backend logic stateless)
+
+#### RAG e document pipeline
+
+- `src/server/ragService.ts`: esegue semantic/vector search sugli indici locali.
+- `src/server/documentService.ts`: parsing, preparazione testo e supporto ingest.
+- `src/server/documentFileUtils.ts`: utilita low-level file parsing/normalizzazione.
+- `src/server/documentConfigStore.ts`: mappa sessione -> configurazione documentale.
+
+Questi moduli vengono chiamati dalle API routes Next.js e terminano con la singola request (nessun processo long-running obbligatorio).
+
+#### Context compaction
+
+- `src/services/contextManager/contextManager.ts`: valuta token/transcript e costruisce memoria compatta.
+- `src/services/contextManager/schemas.ts`: schema strutturato (JSON) del risultato.
+- `src/services/contextManager/initialState.ts`: stato base su cui applicare il merge.
+
+Entrypoint effettivo: `app/api/voice/compact/route.ts`.
+
+#### Logging e tracking costi
+
+- `src/server/sessionCostTracker.ts`: calcolo costo/consumo token.
+- `src/server/usageTracker.ts`: aggregazione utilizzo.
+- `src/server/sessionLogger.ts`: persistenza log sessione.
+
+Nel modello serverless sono utility richiamate per richiesta o in teardown esplicito.
+
+#### Configurazione agente/persona
+
+- `src/config/professorConfig.ts`: persona/sistem prompt/config docente.
+- `src/agent/agentFactory.ts`: composizione agent/tools/schema iniziale usata nella fase di setup.
+
+### 14.4 `public/` (Asset runtime client)
+
+- `public/vad.bundle.min.js` + `public/vad.worklet.bundle.min.js`: motore VAD nel browser.
+- `public/ort.min.js` + `public/ort-wasm-simd-threaded.wasm`: ONNX Runtime Web per inferenza locale.
+- `public/silero_vad_legacy.onnx`: pesi del modello VAD.
+
+Questi asset permettono di tenere il VAD lato client, riducendo latenza e costo di audio input.
+
+---
+
+## 15. Flussi Scenario End-to-End
+
+Di seguito i flussi pratici con l'ordine degli eventi e i file coinvolti.
+
+### 15.1 Scenario A - Session start + token effimero
+
+1. La UI monta `useGeminiLive` in `app/page.tsx`.
+2. `hooks/useGeminiLive.ts` chiama `app/api/voice/token/route.ts`.
+3. L'endpoint genera il token con SDK server-side.
+4. Il client apre la WS diretta a Gemini e invia setup iniziale (persona, tool declarations).
+
+File coinvolti:
+
+- `app/page.tsx`
+- `hooks/useGeminiLive.ts`
+- `app/api/voice/token/route.ts`
+- `src/config/professorConfig.ts`
+- `src/agent/agentFactory.ts`
+
+### 15.2 Scenario B - RAG tool call durante la conversazione
+
+1. Gemini emette un `toolCall` (es. ricerca su documenti).
+2. `hooks/useGeminiLive.ts` intercetta il frame.
+3. Il client chiama endpoint documentale in `app/api/document-config/*` (o endpoint RAG correlato).
+4. L'API route legge configurazione sessione e invoca la ricerca vettoriale.
+5. Il risultato viene restituito al client.
+6. Il client invia `toolResponse` su WS a Gemini, che continua la risposta grounded.
+
+File coinvolti:
+
+- `hooks/useGeminiLive.ts`
+- `app/api/document-config/route.ts`
+- `src/server/documentConfigStore.ts`
+- `src/server/documentService.ts`
+- `src/server/documentFileUtils.ts`
+- `src/server/ragService.ts`
+
+### 15.3 Scenario C - Context compaction al superamento soglia token
+
+1. `hooks/useGeminiLive.ts` monitora `usageMetadata` in arrivo.
+2. Al superamento soglia, congela il momento di switch, drena/bufferizza audio in transito.
+3. Invia transcript/stato a `app/api/voice/compact/route.ts`.
+4. L'endpoint usa `contextManager` per estrarre memoria compatta strutturata.
+5. Restituisce `nextSystemInstruction` al client.
+
+File coinvolti:
+
+- `hooks/useGeminiLive.ts`
+- `app/api/voice/compact/route.ts`
+- `src/services/contextManager/contextManager.ts`
+- `src/services/contextManager/schemas.ts`
+- `src/services/contextManager/initialState.ts`
+
+### 15.4 Scenario D - WebSocket context switch (continuita senza history infinita)
+
+1. Ottenuta `nextSystemInstruction`, il client prepara una nuova setup payload.
+2. `hooks/useGeminiLive.ts` richiede eventualmente un nuovo token (`app/api/voice/token/route.ts`).
+3. Chiude la WS corrente in modo ordinato.
+4. Apre una nuova WS diretta a Gemini con istruzioni compatte aggiornate.
+5. Riprende stream audio e gestione tool call.
+
+File coinvolti:
+
+- `hooks/useGeminiLive.ts`
+- `app/api/voice/token/route.ts`
+- `app/api/voice/compact/route.ts`
+- `src/services/contextManager/contextManager.ts`
+- `src/config/professorConfig.ts`
+
+### 15.5 Scenario E - Upload/config documenti e isolamento per sessione
+
+1. Il client invia configurazione documentale (upload, metadati, session key).
+2. `app/api/document-config/route.ts` salva/aggiorna la config per la sessione.
+3. I servizi documentali processano i file e preparano i dati utili al retrieval.
+4. Le future tool call usano quella configurazione per risultati isolati per sessione.
+
+File coinvolti:
+
+- `app/api/document-config/route.ts`
+- `src/server/documentConfigStore.ts`
+- `src/server/documentService.ts`
+- `src/server/documentFileUtils.ts`
+- `src/server/ragService.ts`
+
+### 15.6 Scenario F - Telemetria/costi/log sessione
+
+1. Durante i turni, il client puo inviare usage events/telemetria.
+2. Le API o utility server-side aggiornano contatori token/costo.
+3. A fine sessione, viene scritto un report strutturato.
+
+File coinvolti:
+
+- `src/server/sessionCostTracker.ts`
+- `src/server/usageTracker.ts`
+- `src/server/sessionLogger.ts`
+
+### 15.7 Scenario G - Data Plane vs Control Plane (riassunto operativo)
+
+- **Data Plane (audio realtime):** `hooks/useGeminiLive.ts` <-> WebSocket Gemini + asset `public/*` per VAD/ONNX.
+- **Control Plane (logica e sicurezza):** `app/api/*` + `src/server/*` + `src/services/contextManager/*`.
+
+Separando i piani, ottieni:
+
+- latenza bassa sul parlato (audio non passa da un relay server custom),
+- segreti protetti lato server (token mint solo via API route),
+- funzioni stateless facili da scalare su Vercel.
 

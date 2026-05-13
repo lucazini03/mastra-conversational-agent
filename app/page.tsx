@@ -1,11 +1,13 @@
 'use client';
 // app/page.tsx
 //
-// Clean professor-focused landing page for MemorAIz.
-// Mirrors the existing public/index.html UI in React.
-// The VAD runtime is loaded from the static bundles in /public via next/script.
+// Professor-focused landing page for MemorAIz.
+// Documents are OPTIONAL — no upload → free-roam mode.
+// VAD scripts are loaded after hydration; the start button is always clickable
+// and shows a clear error if VAD isn't ready yet.
+// A collapsible debug panel replaces the old server terminal.
 
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useReducer } from 'react';
 import Script from 'next/script';
 import { useGeminiLive } from '@/hooks/useGeminiLive';
 
@@ -31,20 +33,78 @@ function formatDuration(ms: number): string {
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
+function nowLabel(): string {
+  const d = new Date();
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}.${String(d.getMilliseconds()).padStart(3, '0')}`;
+}
+
+// ── Debug log ─────────────────────────────────────────────────────────────────
+
+type LogType = 'status' | 'transcript-user' | 'transcript-model' | 'vad' | 'rag' | 'switch' | 'error';
+
+interface LogEntry {
+  id: number;
+  ts: string;
+  type: LogType;
+  text: string;
+}
+
+let _logId = 0;
+
+function logReducer(state: LogEntry[], action: LogEntry): LogEntry[] {
+  // Keep last 300 entries to avoid memory leak
+  const next = [...state, action];
+  return next.length > 300 ? next.slice(next.length - 300) : next;
+}
+
+const LOG_COLORS: Record<LogType, string> = {
+  status: '#94a3b8',
+  'transcript-user': '#38bdf8',
+  'transcript-model': '#7cf9cc',
+  vad: '#fb923c',
+  rag: '#c084fc',
+  switch: '#facc15',
+  error: '#f87171',
+};
+
+const LOG_LABELS: Record<LogType, string> = {
+  status: 'STATUS',
+  'transcript-user': 'USER',
+  'transcript-model': 'AI',
+  vad: 'VAD',
+  rag: 'RAG',
+  switch: 'SWITCH',
+  error: 'ERROR',
+};
+
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function HomePage() {
   // ── State ──────────────────────────────────────────────────────────────
   const [statusText, setStatusText] = useState('Pronto');
-  const [hintText, setHintText] = useState(
-    'Carica i tuoi documenti usando le zone qui sopra, poi premi Avvia Sessione per iniziare l\'esame orale.',
-  );
   const [sessionTimer, setSessionTimer] = useState('00:00');
   const [summaryFileName, setSummaryFileName] = useState('Nessun file selezionato');
   const [ragFileName, setRagFileName] = useState('Nessun file selezionato');
   const [chatValue, setChatValue] = useState('');
   const [sessionActive, setSessionActive] = useState(false);
-  const [scriptsReady, setScriptsReady] = useState(false);
+  const [vadReady, setVadReady] = useState(false);
+
+  // Debug panel
+  const [logs, addLogEntry] = useReducer(logReducer, [] as LogEntry[]);
+  const [showDebug, setShowDebug] = useState(false);
+  const debugEndRef = useRef<HTMLDivElement>(null);
+
+  // ── Helpers ─────────────────────────────────────────────────────────────
+  const addLog = useCallback((type: LogType, text: string) => {
+    addLogEntry({ id: ++_logId, ts: nowLabel(), type, text });
+  }, []);
+
+  // Auto-scroll debug panel
+  useEffect(() => {
+    if (showDebug) {
+      debugEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [logs, showDebug]);
 
   // ── Refs ────────────────────────────────────────────────────────────────
   const summaryInputRef = useRef<HTMLInputElement>(null);
@@ -59,15 +119,18 @@ export default function HomePage() {
 
   // ── useGeminiLive hook ──────────────────────────────────────────────────
   const gemini = useGeminiLive({
-    onStatus: (msg) => setStatusText(msg),
-    onTranscript: (_role, _text) => {
-      // Transcript display is handled by the hook internally.
-      // Extend here to display in UI if desired.
+    onStatus: (msg) => {
+      setStatusText(msg);
+      addLog('status', msg);
     },
-    onSpeakingChange: (_speaking) => {
-      // Robot animation driven by isSpeaking from hook
+    onTranscript: (role, text) => {
+      addLog(role === 'user' ? 'transcript-user' : 'transcript-model', text);
+    },
+    onVadEvent: (source, message) => {
+      addLog('vad', `[${source.toUpperCase()}] ${message}`);
     },
     onContextSwitch: (n) => {
+      addLog('switch', `Context switch #${n} completato.`);
       setStatusText(`Context switch #${n} completato.`);
     },
   });
@@ -91,16 +154,21 @@ export default function HomePage() {
     setSessionTimer('00:00');
   }
 
-  // ── File upload ───────────────────────────────────────────────────────────
+  // ── File upload (optional) ────────────────────────────────────────────────
   async function uploadDocuments(): Promise<{ documentConfigId: string | null }> {
     const summaryFile = summaryInputRef.current?.files?.[0] ?? null;
     const ragFiles = ragInputRef.current?.files
       ? Array.from(ragInputRef.current.files)
       : [];
 
+    // No files → free roam, skip upload entirely
     if (!summaryFile && ragFiles.length === 0) {
+      addLog('status', 'Nessun documento caricato — modalità FREE ROAM.');
       return { documentConfigId: null };
     }
+
+    const names = [summaryFile?.name, ...ragFiles.map((f) => f.name)].filter(Boolean).join(', ');
+    addLog('status', `Caricamento documenti: ${names}`);
 
     const form = new FormData();
     if (summaryFile) form.append('summaryDocument', summaryFile);
@@ -112,6 +180,7 @@ export default function HomePage() {
       throw new Error(payload?.error ?? `Upload failed (${res.status})`);
     }
     const data = await res.json();
+    addLog('status', `Documenti caricati. ID: ${data.documentConfigId} — RAG: ${data.effectiveRagCount} file`);
     return { documentConfigId: data.documentConfigId ?? null };
   }
 
@@ -150,11 +219,15 @@ export default function HomePage() {
       }
       vadRef.current = null;
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const startVad = useCallback(async () => {
     const w = window as any;
-    if (!w.vad?.MicVAD) throw new Error('MicVAD runtime not loaded.');
+    if (!w.vad?.MicVAD) {
+      addLog('error', 'MicVAD runtime non caricato — VAD disabilitato. La sessione continua senza rilevamento automatico della voce.');
+      return; // Non-fatal: session continues, user can use text input
+    }
 
     vadRef.current = await w.vad.MicVAD.new({
       model: 'legacy',
@@ -187,31 +260,33 @@ export default function HomePage() {
       },
     });
     await (vadRef.current as any).start();
+    addLog('status', 'VAD Silero avviato.');
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sendMicAudio, signalSpeechStart, signalSpeechEnd, stopPlayback]);
+  }, [sendMicAudio, signalSpeechStart, signalSpeechEnd, stopPlayback, addLog]);
 
   // ── Start / stop ──────────────────────────────────────────────────────────
 
   async function handleStart() {
     if (sessionActive) return;
+
+    addLog('status', '── Nuova sessione ──────────────────');
     setStatusText('Preparazione documenti...');
-    setHintText('Caricamento documenti in corso, attendi un momento...');
 
     try {
       const { documentConfigId } = await uploadDocuments();
 
       setStatusText('Connessione a Gemini...');
+      addLog('status', 'Richiesta token ephemeral...');
       await startSession({ assistantId: 'professor', documentConfigId: documentConfigId ?? undefined });
 
       setSessionActive(true);
       startTimer();
-      setHintText('Sessione avviata. Inizia a parlare!');
 
       await startVad();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      addLog('error', msg);
       setStatusText(`Errore: ${msg}`);
-      setHintText('Riprova o controlla la console per i dettagli.');
       setSessionActive(false);
       stopTimer();
     }
@@ -222,8 +297,8 @@ export default function HomePage() {
     endSession();
     setSessionActive(false);
     stopTimer();
+    addLog('status', '── Sessione terminata ──────────────');
     setStatusText('Sessione terminata.');
-    setHintText('Premi Avvia Sessione per iniziare una nuova sessione.');
   }
 
   function handleSend() {
@@ -232,10 +307,9 @@ export default function HomePage() {
     setChatValue('');
   }
 
-  // ── Sync status text to hook status ──────────────────────────────────────
+  // ── Sync hook status ──────────────────────────────────────────────────────
   useEffect(() => {
     if (status === 'ready' && !sessionActive) {
-      // Edge case: reconnect resolved
       setSessionActive(true);
     }
     if (status === 'error' || status === 'ended') {
@@ -259,16 +333,21 @@ export default function HomePage() {
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <>
-      {/* Styles from the existing CSS (served from public/) */}
-      {/* eslint-disable-next-line @next/next/no-page-custom-font */}
       <link rel="stylesheet" href="/index.css" />
 
-      {/* VAD scripts — must load before session start */}
-      <Script src="/ort.min.js" strategy="beforeInteractive" />
+      {/*
+        VAD scripts: afterInteractive fires onLoad reliably in App Router.
+        The start button is NOT gated on these — if VAD isn't loaded when the
+        user clicks start, we log a warning and continue without VAD.
+      */}
+      <Script src="/ort.min.js" strategy="afterInteractive" />
       <Script
         src="/vad.bundle.min.js"
-        strategy="beforeInteractive"
-        onLoad={() => setScriptsReady(true)}
+        strategy="afterInteractive"
+        onLoad={() => {
+          setVadReady(true);
+          addLog('status', 'VAD bundle caricato.');
+        }}
       />
 
       <div className="bg-orb bg-orb-a" />
@@ -340,15 +419,18 @@ export default function HomePage() {
           </div>
 
           <p className="status" id="status">{statusText}</p>
-          <p className="hint" id="sessionHint">{hintText}</p>
+          <p className="hint" id="sessionHint">
+            I documenti sono <strong>facoltativi</strong>. Senza file si parte in modalità Free Roam.
+            Carica un documento base per la mappa degli argomenti, poi premi <strong>Avvia Sessione</strong>.
+          </p>
 
-          {/* Document upload */}
+          {/* Document upload — optional */}
           <div className="doc-grid">
             <label className="doc-field" htmlFor="summaryDocInput">
-              <span>Documento base</span>
+              <span>Documento base <em style={{ fontWeight: 400, opacity: 0.6, fontSize: '0.85em' }}>(facoltativo)</em></span>
               <p className="doc-field-desc">PDF, TXT o Markdown. Usato per generare la mappa degli argomenti iniziale della sessione.</p>
               <div className="doc-field-btn">&#8593;&nbsp; Scegli file</div>
-              <p className="doc-field-filename">{summaryFileName}</p>
+              <p className={`doc-field-filename${summaryFileName !== 'Nessun file selezionato' ? ' visible' : ''}`}>{summaryFileName}</p>
               <input
                 id="summaryDocInput"
                 ref={summaryInputRef}
@@ -362,10 +444,10 @@ export default function HomePage() {
             </label>
 
             <label className="doc-field" htmlFor="ragDocInput">
-              <span>Documenti di supporto</span>
+              <span>Documenti di supporto <em style={{ fontWeight: 400, opacity: 0.6, fontSize: '0.85em' }}>(facoltativi)</em></span>
               <p className="doc-field-desc">Uno o più file. Consultati in tempo reale durante la conversazione tramite ricerca semantica.</p>
               <div className="doc-field-btn">&#8593;&nbsp; Scegli file/i</div>
-              <p className="doc-field-filename">{ragFileName}</p>
+              <p className={`doc-field-filename${ragFileName !== 'Nessun file selezionato' ? ' visible' : ''}`}>{ragFileName}</p>
               <input
                 id="ragDocInput"
                 ref={ragInputRef}
@@ -392,7 +474,7 @@ export default function HomePage() {
             <button
               id="startBtn"
               className="btn btn-primary"
-              disabled={sessionActive || !scriptsReady}
+              disabled={sessionActive}
               onClick={handleStart}
             >
               Avvia Sessione
@@ -429,6 +511,80 @@ export default function HomePage() {
               Invia
             </button>
           </div>
+        </section>
+
+        {/* ── Debug panel ──────────────────────────────────────────────────── */}
+        <section style={{ width: '100%', maxWidth: 720, margin: '1.5rem auto 0' }}>
+          <button
+            type="button"
+            onClick={() => setShowDebug((v) => !v)}
+            style={{
+              background: 'transparent',
+              border: '1px solid rgba(124,249,204,0.25)',
+              color: '#94a3b8',
+              borderRadius: 8,
+              padding: '6px 14px',
+              cursor: 'pointer',
+              fontSize: '0.8rem',
+              fontFamily: 'IBM Plex Mono, monospace',
+              letterSpacing: '0.05em',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+            }}
+          >
+            <span style={{ fontSize: '0.65rem' }}>{showDebug ? '▼' : '▶'}</span>
+            DEBUG LOG
+            {logs.length > 0 && (
+              <span style={{ background: 'rgba(124,249,204,0.12)', color: '#7cf9cc', borderRadius: 4, padding: '1px 6px', fontSize: '0.75rem' }}>
+                {logs.length}
+              </span>
+            )}
+            {!vadReady && (
+              <span style={{ color: '#fb923c', fontSize: '0.72rem' }}>(VAD loading…)</span>
+            )}
+          </button>
+
+          {showDebug && (
+            <div
+              style={{
+                marginTop: 8,
+                background: 'rgba(10,20,40,0.85)',
+                border: '1px solid rgba(124,249,204,0.15)',
+                borderRadius: 10,
+                padding: '10px 14px',
+                height: 340,
+                overflowY: 'auto',
+                fontFamily: 'IBM Plex Mono, monospace',
+                fontSize: '0.78rem',
+                lineHeight: 1.6,
+              }}
+            >
+              {logs.length === 0 && (
+                <div style={{ color: '#475569', fontStyle: 'italic' }}>
+                  Nessun evento ancora. Avvia la sessione per vedere i log.
+                </div>
+              )}
+              {logs.map((entry) => (
+                <div key={entry.id} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', marginBottom: 2 }}>
+                  <span style={{ color: '#475569', flexShrink: 0, userSelect: 'none' }}>{entry.ts}</span>
+                  <span
+                    style={{
+                      color: LOG_COLORS[entry.type],
+                      flexShrink: 0,
+                      minWidth: 90,
+                      fontWeight: 600,
+                      userSelect: 'none',
+                    }}
+                  >
+                    [{LOG_LABELS[entry.type]}]
+                  </span>
+                  <span style={{ color: '#cbd5e1', wordBreak: 'break-word' }}>{entry.text}</span>
+                </div>
+              ))}
+              <div ref={debugEndRef} />
+            </div>
+          )}
         </section>
       </main>
     </>
