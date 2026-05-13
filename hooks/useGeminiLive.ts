@@ -122,6 +122,8 @@ export interface UseGeminiLiveOptions {
   onContextSwitch?: (switchNumber: number) => void;
   /** Called with cost/token information when a session ends. */
   onCostSummary?: (summary: CostSummary) => void;
+  /** Called at each turnComplete with the current cumulative input token count. */
+  onTurnComplete?: (cumulativeInputTokens: number, deltaFromLastSwitch: number) => void;
 }
 
 export interface SessionStartOptions {
@@ -165,6 +167,7 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
     onVadEvent,
     onSpeakingChange,
     onContextSwitch,
+    onTurnComplete,
   } = opts;
 
   // ── React state (drives UI re-renders) ──────────────────────────────────
@@ -655,10 +658,16 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
         // ── Usage metadata (token counting) ───────────────────────────────
         const usage = data?.usageMetadata ?? data?.usage_metadata;
         if (usage) {
+          // Pick the first available field — do NOT sum them, they are aliases for
+          // the same value (camelCase vs snake_case) or total-vs-prompt variants.
+          // promptTokenCount is the input/context size, which is what matters for
+          // the compaction threshold. Fall back to totalTokenCount if not present.
           const promptTokens =
-            (usage.promptTokenCount ?? 0) +
-            (usage.prompt_token_count ?? 0) +
-            (usage.totalTokenCount ?? 0);
+            usage.promptTokenCount ??
+            usage.prompt_token_count ??
+            usage.totalTokenCount ??
+            usage.total_token_count ??
+            0;
 
           cumulativeInputTokensRef.current = Math.max(
             cumulativeInputTokensRef.current,
@@ -678,6 +687,10 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
 
         if (turnComplete) {
           setSpeaking(false);
+          onTurnComplete?.(
+            cumulativeInputTokensRef.current,
+            cumulativeInputTokensRef.current - lastSwitchTokenCountRef.current,
+          );
           maybeDoContextSwitch().catch((e) =>
             console.error('[GeminiLive] maybeDoContextSwitch error:', e),
           );

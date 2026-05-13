@@ -133,6 +133,9 @@ export default function HomePage() {
       addLog('switch', `Context switch #${n} completato.`);
       setStatusText(`Context switch #${n} completato.`);
     },
+    onTurnComplete: (cumulative, delta) => {
+      addLog('status', `[tokens] cumulative=${cumulative.toLocaleString()} | delta_from_last_switch=${delta.toLocaleString()}`);
+    },
   });
 
   const { status, isSpeaking, startSession, endSession, sendText, sendMicAudio, signalSpeechStart, signalSpeechEnd, stopPlayback } = gemini;
