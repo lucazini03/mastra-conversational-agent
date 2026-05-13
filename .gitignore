@@ -12,6 +12,8 @@ dist
 rag*
 text.txt
 usage_tracking.log
+.next
+.vscode
 
 # Session file logs (auto-generated, not for version control)
 logs/
