@@ -165,6 +165,10 @@ async function mintEphemeralToken(
     inputAudioTranscription: {},
     outputAudioTranscription: {},
     sessionResumption: {},
+    // Disable Gemini's built-in VAD — Silero drives turns from the browser.
+    realtimeInputConfig: {
+      automaticActivityDetection: { disabled: true },
+    },
   };
 
   if (tools.length > 0) {
@@ -284,6 +288,22 @@ export async function POST(req: NextRequest) {
       } catch (err) {
         console.error('[/api/voice/token] Document summary failed:', err);
         // Non-fatal — continue without summary enrichment
+      }
+    }
+
+    // Warm up the RAG vector index before minting the token.
+    // This runs the embedding batch once while the UI shows "Requesting session token...",
+    // so the 12-second indexing delay doesn't hit mid-conversation.
+    if (hasRagDocuments && ragFiles.length > 0) {
+      try {
+        const { getSharedBrowserRagService } = await import('@/src/server/ragService');
+        const safeSuffix = documentConfigId ? documentConfigId.replace(/-/g, '_') : 'default';
+        const ragService = getSharedBrowserRagService({ documentPaths: ragFiles, indexSuffix: safeSuffix });
+        console.log('[/api/voice/token] Warming up RAG index...');
+        await ragService.ensureReady();
+        console.log('[/api/voice/token] RAG index ready.');
+      } catch (err) {
+        console.error('[/api/voice/token] RAG warm-up failed (non-fatal):', err);
       }
     }
 

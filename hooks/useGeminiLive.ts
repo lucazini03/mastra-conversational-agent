@@ -239,8 +239,13 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
 
   function ensureAudioContext(): AudioContext {
     if (!audioCtxRef.current || audioCtxRef.current.state === 'closed') {
-      audioCtxRef.current = new AudioContext({ sampleRate: PLAYBACK_SAMPLE_RATE });
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      audioCtxRef.current = new AudioCtx({ sampleRate: PLAYBACK_SAMPLE_RATE });
       nextPlaybackTimeRef.current = 0;
+    }
+    // Force-resume if the browser auto-suspended it (requires user gesture context)
+    if (audioCtxRef.current.state === 'suspended') {
+      audioCtxRef.current.resume();
     }
     return audioCtxRef.current;
   }
@@ -251,8 +256,11 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
 
     try {
       const raw = atob(base64Pcm);
-      const bytes = new Uint8Array(raw.length);
-      for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+
+      // Ensure even byte length — Int16Array requires it; odd buffers throw silently
+      const safeLength = raw.length - (raw.length % 2);
+      const bytes = new Uint8Array(safeLength);
+      for (let i = 0; i < safeLength; i++) bytes[i] = raw.charCodeAt(i);
 
       // Int16 → Float32
       const int16 = new Int16Array(bytes.buffer);
@@ -260,6 +268,9 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
       for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
 
       const ctx = ensureAudioContext();
+      // ensureAudioContext already calls resume(), but be explicit here too
+      if (ctx.state === 'suspended') ctx.resume();
+
       const buffer = ctx.createBuffer(1, float32.length, PLAYBACK_SAMPLE_RATE);
       buffer.copyToChannel(float32, 0);
 
@@ -281,8 +292,8 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
       };
 
       setSpeaking(true);
-    } catch {
-      // Non-fatal
+    } catch (err) {
+      console.error('[GeminiLive] Errore riproduzione audio:', err);
     }
   }
 
@@ -523,66 +534,112 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
    */
   async function connectGemini(token: string, isSwitch = false): Promise<void> {
     return new Promise((resolve, reject) => {
+      let hasResolved = false;
+      const safeResolve = () => {
+        if (!hasResolved) { hasResolved = true; resolve(); }
+      };
+      const safeReject = (err: Error) => {
+        if (!hasResolved) { hasResolved = true; reject(err); }
+      };
+
       const url = buildWsUrl(token);
+      console.log('[GeminiLive] Tentativo di connessione a:', url.replace(token, 'TOKEN_OSCURATO'));
       const ws = new WebSocket(url);
       wsRef.current = ws;
 
       const timeout = setTimeout(() => {
         ws.close();
-        reject(new Error('Gemini WS connection timeout'));
+        console.error('[GeminiLive] Timeout connessione WS (15s)');
+        safeReject(new Error('Gemini WS connection timeout. Google non ha risposto.'));
       }, 15000);
 
       ws.onopen = () => {
         clearTimeout(timeout);
-
-        // Send minimal setup — config is baked into the ephemeral token.
-        ws.send(
-          JSON.stringify({
-            setup: {
-              model: `models/${modelRef.current}`,
-            },
-          }),
-        );
-
-        // Connection opened; resolve once we get the setup ACK (first message).
+        console.log('[GeminiLive] WebSocket APERTO! Invio setup frame...');
+        // Ephemeral tokens already encode model + constraints server-side.
+        // Sending `model` here causes Google to reject with HTTP 400.
+        ws.send(JSON.stringify({ setup: {} }));
       };
 
-      ws.onmessage = (event: MessageEvent) => {
+      ws.onmessage = async (event: MessageEvent) => {
+        // Safely extract text regardless of whether Google sends Blob, ArrayBuffer, or String.
+        // The Live API typically sends binary Blobs — event.data.toString() on a Blob
+        // yields "[object Blob]" which breaks JSON.parse.
+        let rawText = '';
+        if (event.data instanceof Blob) {
+          rawText = await event.data.text();
+        } else if (event.data instanceof ArrayBuffer) {
+          rawText = new TextDecoder().decode(event.data);
+        } else {
+          rawText = event.data;
+        }
+
+        console.log('[GeminiLive] Messaggio ricevuto (Testo):', rawText);
+
         let data: any;
         try {
-          data = JSON.parse(typeof event.data === 'string' ? event.data : event.data.toString());
-        } catch {
+          data = JSON.parse(rawText);
+        } catch (e) {
+          console.error('[GeminiLive] Fallito parsing JSON del messaggio:', e);
           return;
         }
 
-        // ── Setup ACK ─────────────────────────────────────────────────────
-        // Google sends a `setupComplete` message after setup. That's when the
-        // session is truly ready. Resolve the promise here to continue.
+        // ── Google API error frame ─────────────────────────────────────────
+        if (data?.error) {
+          const errMsg = data.error.message || JSON.stringify(data.error);
+          console.error('[GeminiLive] ERRORE API da Google:', errMsg);
+          safeReject(new Error(`Google API Error: ${errMsg}`));
+          ws.close();
+          return;
+        }
+
+        // ── Setup ACK / Session active ────────────────────────────────────
+        // Resolve as soon as Google confirms: setupComplete, serverContent,
+        // or an empty-object ACK (older API versions).
         const isSetupComplete =
           data?.setupComplete != null ||
           data?.setup_complete != null ||
-          // Older API versions just ACK with an empty object or serverContent
           (data && Object.keys(data).length === 0);
+        const hasServerContent =
+          data?.serverContent != null ||
+          data?.server_content != null;
 
-        if (isSetupComplete && !isReconnectingRef.current) {
+        if (!hasResolved && (isSetupComplete || hasServerContent)) {
+          console.log('[GeminiLive] Setup confermato/Sessione attiva. Sblocco UI.');
           reconnectAttemptsRef.current = 0;
-          setStatus('ready');
-          emitStatus(isSwitch ? 'Sessione ripresa.' : 'Sessione avviata.');
+          if (!isReconnectingRef.current) {
+            setStatus('ready');
+            emitStatus(isSwitch ? 'Sessione ripresa.' : 'Sessione avviata.');
+          }
 
           // Replay buffered mic audio to new session after a context switch.
           if (isSwitch && switchAudioBufferRef.current.length > 0) {
+            console.log(`[GeminiLive] Replay di ${switchAudioBufferRef.current.length} chunk audio...`);
             for (const chunk of switchAudioBufferRef.current) {
               wsSendAudio(ws, chunk);
             }
             switchAudioBufferRef.current = [];
           }
 
-          resolve();
+          safeResolve();
+
+          // Trigger the assistant to speak first on a fresh session.
+          // Uses realtimeInput.text (same as old geminiSpeakFirst) so Gemini
+          // treats it as a turn-start cue, not a user message in the transcript.
+          if (!isSwitch && !isReconnectingRef.current) {
+            setTimeout(() => {
+              const activeWs = wsRef.current;
+              if (activeWs && activeWs.readyState === WebSocket.OPEN) {
+                activeWs.send(JSON.stringify({ realtimeInput: { text: 'Inizia la sessione ora.' } }));
+              }
+            }, 200);
+          }
+          // Do NOT return — continue processing audio/transcripts in this same frame
         }
 
         // ── Audio ──────────────────────────────────────────────────────────
         const audioPart = data?.serverContent?.modelTurn?.parts?.find(
-          (p: any) => p?.inlineData?.mimeType === 'audio/pcm',
+          (p: any) => p?.inlineData?.mimeType?.startsWith('audio/pcm'),
         );
         if (audioPart?.inlineData?.data) {
           playAudioChunk(audioPart.inlineData.data);
@@ -601,11 +658,8 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
           const promptTokens =
             (usage.promptTokenCount ?? 0) +
             (usage.prompt_token_count ?? 0) +
-            (usage.totalTokenCount ?? 0); // some versions use totalTokenCount
+            (usage.totalTokenCount ?? 0);
 
-          // Delta-based accumulation: Gemini reports cumulative prompt tokens
-          // per session; we track delta-per-turn to avoid double-counting.
-          // Actually usageMetadata is CUMULATIVE per session, so we just set:
           cumulativeInputTokensRef.current = Math.max(
             cumulativeInputTokensRef.current,
             promptTokens,
@@ -624,8 +678,6 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
 
         if (turnComplete) {
           setSpeaking(false);
-          // Stage 2 of compaction: if extraction is done, do the switch now.
-          // This runs async — next mic input won't block on it.
           maybeDoContextSwitch().catch((e) =>
             console.error('[GeminiLive] maybeDoContextSwitch error:', e),
           );
@@ -668,19 +720,29 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
       };
 
       ws.onclose = (event) => {
+        clearTimeout(timeout);
+        console.log(`[GeminiLive] WS CHIUSO. Code: ${event.code}, Reason: ${event.reason}`);
+
         if (intentionalCloseRef.current) {
+          safeResolve();
           setStatus('ended');
           return;
         }
 
+        // If closed before setupComplete, reject so the caller sees the error.
+        if (!hasResolved) {
+          safeReject(new Error(`Connection closed before setup: ${event.code} ${event.reason}`));
+        }
+
         if (!isSwitch) {
-          // Unexpected close — attempt reconnect
           handleUnexpectedClose(event.code, event.reason);
         }
       };
 
       ws.onerror = (err) => {
-        console.error('[GeminiLive] WS error:', err);
+        clearTimeout(timeout);
+        console.error('[GeminiLive] WS ERRORE di rete:', err);
+        safeReject(new Error('WebSocket network error'));
         if (!intentionalCloseRef.current && !isSwitch) {
           handleUnexpectedClose(0, 'WebSocket error');
         }
@@ -719,6 +781,8 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
 
       await connectGemini(token, false);
       isReconnectingRef.current = false;
+      setStatus('ready');
+      emitStatus('Sessione riconnessa.');
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error('[GeminiLive] Reconnect failed:', msg);
@@ -769,8 +833,11 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
     const b64 = pcmBuffer.toString('base64');
     ws.send(
       JSON.stringify({
-        realtime_input: {
-          media_chunks: [{ mime_type: 'audio/pcm', data: b64 }],
+        realtimeInput: {
+          audio: {
+            mimeType: 'audio/pcm',
+            data: b64,
+          },
         },
       }),
     );
@@ -782,14 +849,14 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
     stopPlayback();
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    ws.send(JSON.stringify({ realtime_input: { activityStart: {} } }));
+    ws.send(JSON.stringify({ realtimeInput: { activityStart: {} } }));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const signalSpeechEnd = useCallback(() => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    ws.send(JSON.stringify({ realtime_input: { activityEnd: {} } }));
+    ws.send(JSON.stringify({ realtimeInput: { activityEnd: {} } }));
   }, []);
 
   // ── Text prompt ──────────────────────────────────────────────────────────
@@ -808,9 +875,9 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
 
     ws.send(
       JSON.stringify({
-        client_content: {
+        clientContent: {
           turns: [{ role: 'user', parts: [{ text: trimmed }] }],
-          turn_complete: true,
+          turnComplete: true,
         },
       }),
     );
@@ -820,8 +887,13 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
   // ── Session lifecycle ────────────────────────────────────────────────────
 
   const startSession = useCallback(async (opts: SessionStartOptions = {}) => {
+    // Unlock AudioContext synchronously inside the user-gesture handler (button click).
+    // If called later (async), the browser may refuse to resume it.
+    ensureAudioContext();
+
     intentionalCloseRef.current = false;
     reconnectAttemptsRef.current = 0;
+    isReconnectingRef.current = false; // always reset from any previous session
 
     assistantIdRef.current = opts.assistantId ?? 'professor';
     documentConfigIdRef.current = opts.documentConfigId ?? null;
