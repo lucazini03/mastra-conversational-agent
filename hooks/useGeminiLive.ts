@@ -25,16 +25,19 @@
 //
 // ── Preemptive Compaction (Phase 4) ─────────────────────────────────────────
 //
-//  When cumulativeInputTokens - lastSwitchTokens >= TOKEN_THRESHOLD:
-//    → fire POST /api/voice/compact IMMEDIATELY (async, do not await)
-//      (this runs the slow LLM extraction while the user is still speaking)
-//    → store the promise in compactPromiseRef
-//    → start buffering transcript turns in bufferTurnsRef
+//  When delta (cumulative - lastSwitchTokens) >= TOKEN_THRESHOLD:
+//    → fire POST /api/voice/compact IMMEDIATELY (fire-and-forget, non-blocking)
+//    → set compactionStateRef = 'EXTRACTING'
+//    → record transcript index at extraction time (transcriptIndexAtExtractionRef)
 //
-//  At the next turnComplete:
-//    → await compactPromiseRef (usually already resolved)
-//    → call POST /api/voice/token with { compactState, bufferTurns } to get new token
-//    → do the WS swap (isContextSwitching = true, drain buffer, reconnect)
+//  When compact API returns:
+//    → set compactionStateRef = 'READY', store result in pendingCompactResultRef
+//
+//  At next turnComplete (Gemini finishes speaking):
+//    → atomically claim the switch (compactionStateRef = 'IDLE')
+//    → compute volatile buffer = transcript.slice(transcriptIndexAtExtractionRef)
+//    → POST /api/voice/token with { compactState, bufferTurns: volatileBuffer }
+//    → lobotomise old WS (null out handlers), close it, open new WS
 //
 // ── Audio Buffer Drainer (Phase 5) ──────────────────────────────────────────
 //
@@ -191,25 +194,26 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
   const reconnectAttemptsRef = useRef<number>(0);
   const isReconnectingRef = useRef<boolean>(false);
 
-  // Token tracking
-  const historicalInputTokensRef = useRef<number>(0); // sum of final token counts from all previous WS connections
-  const currentTokenCountRef = useRef<number>(0);    // token count reported by the active WS
-  const cumulativeInputTokensRef = useRef<number>(0); // historical + current
-  const lastSwitchTokenCountRef = useRef<number>(0);
+  // Token tracking — three refs, no redundancy
+  // cumulative = historicalTokensRef + currentWsTokensRef (computed inline, never stored)
+  // lastCompactionTokensRef is frozen at the EXACT moment threshold is crossed,
+  // so delta restarts cleanly from 0 regardless of async switch latency.
+  const historicalTokensRef = useRef<number>(0);      // total from all closed WS connections
+  const currentWsTokensRef = useRef<number>(0);       // token count from the live WS
+  const lastCompactionTokensRef = useRef<number>(0);  // snapshot taken at trigger time
 
   // Transcript (for compaction)
   const transcriptRef: MutableRefObject<TranscriptEntry[]> = useRef([]);
   const turnCounterRef = useRef<number>(0);
 
-  // Compaction state machine
-  const compactPromiseRef = useRef<Promise<{ compactState: AnyAssistantState; lastTurnIndex: number }> | null>(null);
-  const newTokenForSwitchRef = useRef<string | null>(null);
+  // Compaction state machine ('IDLE' → 'EXTRACTING' → 'READY' → 'IDLE')
+  const compactionStateRef = useRef<'IDLE' | 'EXTRACTING' | 'READY'>('IDLE');
+  const pendingCompactResultRef = useRef<{ compactState: AnyAssistantState; lastTurnIndex: number } | null>(null);
+  // Index into transcriptRef at the moment extraction fired — used to slice the volatile buffer at switch time.
+  const transcriptIndexAtExtractionRef = useRef<number>(0);
   const baseSystemPromptRef = useRef<string>('');
   const currentStateRef = useRef<AnyAssistantState | null>(null);
-  const lastExtractionTurnIndexRef = useRef<number>(-1);
-  // Buffer turns: transcript entries accumulated AFTER extraction fires
-  const isBufferingRef = useRef<boolean>(false);
-  const bufferTurnsRef = useRef<Array<{ role: 'user' | 'model'; text: string }>>([]);
+  const lastExtractionTurnIndexRef = useRef<number>(-1); // lastTurnIndex from compact result, passed to next compact call
   const contextSwitchCountRef = useRef<number>(0);
 
   // Context-switch audio buffer (Phase 5)
@@ -325,52 +329,48 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
     turnCounterRef.current++;
     const entry: TranscriptEntry = { role, text: trimmed, turnIndex: turnCounterRef.current };
     transcriptRef.current.push(entry);
-
-    // If extraction has started, track buffer turns
-    if (isBufferingRef.current) {
-      const last = bufferTurnsRef.current[bufferTurnsRef.current.length - 1];
-      if (last && last.role === role) {
-        last.text += ' ' + trimmed;
-      } else {
-        bufferTurnsRef.current.push({ role, text: trimmed });
-      }
-    }
-
     onTranscript?.(role, trimmed);
   }
 
   // ── Context compaction (Phase 4) ─────────────────────────────────────────
 
   /**
-   * Stage 1: fire POST /api/voice/compact IMMEDIATELY (async).
-   * Called as soon as the token threshold is crossed — mid-turn, while the
-   * user is still speaking. This hides the LLM extraction latency.
+   * Fire-and-forget LLM extraction.
+   *
+   * Called as soon as the token DELTA threshold is crossed (mid-turn, while the
+   * user may still be speaking). Sets state = 'EXTRACTING' immediately so the
+   * threshold check won't re-trigger. When the HTTP call returns, state becomes
+   * 'READY' and the actual WS swap is deferred to the next turnComplete.
+   *
+   * The "volatile buffer" — turns that happen BETWEEN extraction start and the
+   * switch — is computed at switch time by slicing transcriptRef from
+   * transcriptIndexAtExtractionRef.current, so nothing needs to be accumulated.
    */
   function triggerCompaction(): void {
-    if (compactPromiseRef.current) return; // already in flight
-
-    const transcript = [...transcriptRef.current];
-    const currentState = currentStateRef.current;
-    const lastExtractionTurnIndex = lastExtractionTurnIndexRef.current;
-
-    // Start accumulating buffer turns
-    isBufferingRef.current = true;
-    bufferTurnsRef.current = [];
+    if (compactionStateRef.current !== 'IDLE') return;
 
     console.log(
-      `[GeminiLive] Compaction triggered at ${cumulativeInputTokensRef.current} input tokens`,
+      `[GeminiLive] Token delta threshold reached (delta=${(historicalTokensRef.current + currentWsTokensRef.current) - lastCompactionTokensRef.current}, ` +
+      `total=${historicalTokensRef.current + currentWsTokensRef.current}, lastCompaction=${lastCompactionTokensRef.current}, threshold=${TOKEN_THRESHOLD}). ` +
+      `Will extract, then switch at next turnComplete.`,
+    );
+    compactionStateRef.current = 'EXTRACTING';
+    transcriptIndexAtExtractionRef.current = transcriptRef.current.length;
+
+    console.log(
+      `[GeminiLive] Compaction triggered at delta=${(historicalTokensRef.current + currentWsTokensRef.current) - lastCompactionTokensRef.current} cumulative=${historicalTokensRef.current + currentWsTokensRef.current}`,
     );
     emitStatus('Compacting context...');
 
-    compactPromiseRef.current = fetch('/api/voice/compact', {
+    fetch('/api/voice/compact', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         assistantId: assistantIdRef.current,
         sessionMode: sessionModeRef.current,
-        transcript,
-        currentState,
-        lastExtractionTurnIndex,
+        transcript: [...transcriptRef.current],
+        currentState: currentStateRef.current,
+        lastExtractionTurnIndex: lastExtractionTurnIndexRef.current,
       }),
     })
       .then(async (res) => {
@@ -378,103 +378,15 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
           const { error } = await res.json().catch(() => ({ error: res.statusText }));
           throw new Error(`Compact failed: ${error}`);
         }
-        return res.json() as Promise<{ compactState: AnyAssistantState; lastTurnIndex: number }>;
+        const result = await res.json() as { compactState: AnyAssistantState; lastTurnIndex: number };
+        pendingCompactResultRef.current = result;
+        compactionStateRef.current = 'READY';
+        console.log('[GeminiLive] Extraction complete — will switch at next turnComplete.');
       })
       .catch((err) => {
-        console.error('[GeminiLive] Compact error:', err.message);
-        // Clear so we can retry on the next threshold crossing
-        compactPromiseRef.current = null;
-        isBufferingRef.current = false;
-        throw err;
+        console.error('[GeminiLive] Compact error:', err instanceof Error ? err.message : err);
+        compactionStateRef.current = 'IDLE'; // Allow retry at next threshold crossing
       });
-  }
-
-  /**
-   * Stage 2: called at every turnComplete. If compaction is done, executes
-   * the WS swap. If compaction is still running, waits for it.
-   *
-   * The token remint (POST /api/voice/token with compactState + bufferTurns)
-   * is chained immediately after compact resolves to minimise latency.
-   */
-  async function maybeDoContextSwitch(): Promise<void> {
-    if (!compactPromiseRef.current) return;
-
-    try {
-      const { compactState, lastTurnIndex } = await compactPromiseRef.current;
-
-      // Mint new token with assembled instruction (buffer turns now finalised).
-      const tokenRes = await fetch('/api/voice/token', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          assistantId: assistantIdRef.current,
-          sessionMode: sessionModeRef.current,
-          compactState,
-          bufferTurns: [...bufferTurnsRef.current],
-          baseSystemPrompt: baseSystemPromptRef.current,
-          documentConfigId: documentConfigIdRef.current,
-        }),
-      });
-
-      if (!tokenRes.ok) {
-        const { error } = await tokenRes.json().catch(() => ({ error: tokenRes.statusText }));
-        throw new Error(`Token remint failed: ${error}`);
-      }
-
-      const { token } = await tokenRes.json() as { token: string };
-
-      // ── Execute the WS swap ───────────────────────────────────────────
-      isContextSwitchingRef.current = true;
-      switchAudioBufferRef.current = [];
-      // Do NOT call setStatus('switching') — keep status 'ready' so the UI stays responsive.
-      emitStatus('Context switch in progress...');
-
-      // Save current WS token count into historical BEFORE closing the old WS.
-      // This ensures cumulativeInputTokensRef stays accurate across connections.
-      historicalInputTokensRef.current += currentTokenCountRef.current;
-      currentTokenCountRef.current = 0;
-      lastSwitchTokenCountRef.current = historicalInputTokensRef.current;
-
-      // Update compaction state
-      currentStateRef.current = compactState;
-      lastExtractionTurnIndexRef.current = lastTurnIndex;
-      isBufferingRef.current = false;
-
-      // 🔇 Lobotomise the old WS before closing it.
-      // Without this, ws.onclose fires asynchronously with isSwitch=false
-      // and handleUnexpectedClose() opens a ghost WebSocket #3 that
-      // reconnects the OLD session, overwriting the new compacted one.
-      const oldWs = wsRef.current;
-      wsRef.current = null;
-      if (oldWs) {
-        oldWs.onclose = null;
-        oldWs.onerror = null;
-        oldWs.onmessage = null;
-        if (oldWs.readyState !== WebSocket.CLOSED) {
-          oldWs.close(1000, 'context-switch');
-        }
-      }
-
-      // Open new WS
-      await connectGemini(token, true);
-
-      compactPromiseRef.current = null;
-      newTokenForSwitchRef.current = null;
-      isContextSwitchingRef.current = false;
-
-      contextSwitchCountRef.current++;
-      setContextSwitchCount(contextSwitchCountRef.current);
-      onContextSwitch?.(contextSwitchCountRef.current);
-      emitStatus('Context switch complete.');
-      console.log(`[GeminiLive] Context switch #${contextSwitchCountRef.current} complete`);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error('[GeminiLive] Context switch failed:', msg);
-      emitStatus(`Context switch failed: ${msg}`);
-      compactPromiseRef.current = null;
-      isContextSwitchingRef.current = false;
-      isBufferingRef.current = false;
-    }
   }
 
   // ── Tool call handling ───────────────────────────────────────────────────
@@ -687,12 +599,16 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
             usage.total_token_count ??
             0;
 
-          // Accumulate: historical tokens (from closed WS) + current WS tokens
-          currentTokenCountRef.current = promptTokens;
-          cumulativeInputTokensRef.current = historicalInputTokensRef.current + promptTokens;
+          // current WS token count + accumulated historical = cumulative
+          currentWsTokensRef.current = promptTokens;
+          const cumulative = historicalTokensRef.current + promptTokens;
 
-          const delta = cumulativeInputTokensRef.current - lastSwitchTokenCountRef.current;
-          if (delta >= TOKEN_THRESHOLD && !compactPromiseRef.current) {
+          const delta = cumulative - lastCompactionTokensRef.current;
+          if (delta >= TOKEN_THRESHOLD && compactionStateRef.current === 'IDLE') {
+            // 🔒 FREEZE the threshold snapshot NOW — before any async work.
+            // This makes delta restart from exactly 0 for the next cycle,
+            // regardless of how long the LLM extraction + WS swap takes.
+            lastCompactionTokensRef.current = cumulative;
             triggerCompaction();
           }
         }
@@ -704,13 +620,100 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
 
         if (turnComplete) {
           setSpeaking(false);
+          const cumulative = historicalTokensRef.current + currentWsTokensRef.current;
           onTurnComplete?.(
-            cumulativeInputTokensRef.current,
-            cumulativeInputTokensRef.current - lastSwitchTokenCountRef.current,
+            cumulative,
+            cumulative - lastCompactionTokensRef.current,
           );
-          maybeDoContextSwitch().catch((e) =>
-            console.error('[GeminiLive] maybeDoContextSwitch error:', e),
-          );
+
+          // ── Context switch: only fires when extraction is READY ────────
+          // Atomically claim the switch by resetting state before any await,
+          // preventing a second turnComplete from starting a parallel switch.
+          if (compactionStateRef.current === 'READY' && pendingCompactResultRef.current) {
+            const { compactState, lastTurnIndex } = pendingCompactResultRef.current;
+            compactionStateRef.current = 'IDLE';
+            pendingCompactResultRef.current = null;
+
+            // Volatile buffer: turns that happened while extraction was running.
+            const volatileBuffer = transcriptRef.current
+              .slice(transcriptIndexAtExtractionRef.current)
+              .map(t => ({ role: t.role, text: t.text }));
+
+            // Start buffering mic audio so nothing is lost during the async swap.
+            isContextSwitchingRef.current = true;
+            switchAudioBufferRef.current = [];
+
+            // Update historical total with this WS's final count.
+            // DO NOT touch lastCompactionTokensRef — it was already frozen at trigger time.
+            historicalTokensRef.current += currentWsTokensRef.current;
+            currentWsTokensRef.current = 0;
+
+            // Persist compact state for future extractions.
+            currentStateRef.current = compactState;
+            lastExtractionTurnIndexRef.current = lastTurnIndex;
+
+            // 🔇 LOBOTOMISE THE OLD WS NOW — synchronously, before any await.
+            // If we leave this until inside the async IIFE, the old WS can still
+            // fire usageMetadata frames during the token-remint fetch.  Those
+            // frames overwrite currentTokenCountRef (which we just zeroed) with
+            // the old high count, making delta ≥ threshold again and re-triggering
+            // compaction on every subsequent turn.
+            const oldWs = wsRef.current;
+            wsRef.current = null;
+            if (oldWs) {
+              oldWs.onclose = null;
+              oldWs.onerror = null;
+              oldWs.onmessage = null;
+              if (oldWs.readyState !== WebSocket.CLOSED) {
+                oldWs.close(1000, 'context-switch');
+              }
+            }
+
+            console.log(
+              `[GeminiLive] Context switch starting — volatile buffer: ${volatileBuffer.length} turns, ` +
+              `historicalTokens=${historicalTokensRef.current}, lastCompaction=${lastCompactionTokensRef.current}`,
+            );
+            emitStatus('Context switch in progress...');
+
+            // Run the async token-remint + reconnect without blocking the message loop.
+            (async () => {
+              try {
+                const tokenRes = await fetch('/api/voice/token', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    assistantId: assistantIdRef.current,
+                    sessionMode: sessionModeRef.current,
+                    compactState,
+                    bufferTurns: volatileBuffer,
+                    baseSystemPrompt: baseSystemPromptRef.current,
+                    documentConfigId: documentConfigIdRef.current,
+                  }),
+                });
+
+                if (!tokenRes.ok) {
+                  const { error } = await tokenRes.json().catch(() => ({ error: tokenRes.statusText }));
+                  throw new Error(`Token remint failed: ${error}`);
+                }
+
+                const { token } = await tokenRes.json() as { token: string };
+
+                await connectGemini(token, true);
+
+                isContextSwitchingRef.current = false;
+                contextSwitchCountRef.current++;
+                setContextSwitchCount(contextSwitchCountRef.current);
+                onContextSwitch?.(contextSwitchCountRef.current);
+                emitStatus(`Context switch #${contextSwitchCountRef.current} completato.`);
+                console.log(`[GeminiLive] Context switch #${contextSwitchCountRef.current} complete. historical=${historicalTokensRef.current}, lastCompaction=${lastCompactionTokensRef.current}`);
+              } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                console.error('[GeminiLive] Context switch failed:', msg);
+                emitStatus(`Context switch failed: ${msg}`);
+                isContextSwitchingRef.current = false;
+              }
+            })();
+          }
         }
 
         // ── Tool calls ─────────────────────────────────────────────────────
@@ -936,17 +939,16 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
     sessionModeRef.current = undefined;
 
     // Reset state
-    historicalInputTokensRef.current = 0;
-    currentTokenCountRef.current = 0;
-    cumulativeInputTokensRef.current = 0;
-    lastSwitchTokenCountRef.current = 0;
+    historicalTokensRef.current = 0;
+    currentWsTokensRef.current = 0;
+    lastCompactionTokensRef.current = 0;
     transcriptRef.current = [];
     turnCounterRef.current = 0;
     currentStateRef.current = null;
     lastExtractionTurnIndexRef.current = -1;
-    compactPromiseRef.current = null;
-    isBufferingRef.current = false;
-    bufferTurnsRef.current = [];
+    compactionStateRef.current = 'IDLE';
+    pendingCompactResultRef.current = null;
+    transcriptIndexAtExtractionRef.current = 0;
     contextSwitchCountRef.current = 0;
     resumptionHandleRef.current = null;
     pendingMicByteRef.current = null;
@@ -1000,8 +1002,8 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
 
   const endSession = useCallback(() => {
     intentionalCloseRef.current = true;
-    compactPromiseRef.current = null;
-    isBufferingRef.current = false;
+    compactionStateRef.current = 'IDLE';
+    pendingCompactResultRef.current = null;
 
     const ws = wsRef.current;
     wsRef.current = null;

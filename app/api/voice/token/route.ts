@@ -229,9 +229,18 @@ export async function POST(req: NextRequest) {
         bufferTurns,
       );
 
+      console.log(
+        `[token] Context switch — volatile buffer: ${bufferTurns.length} turns (${JSON.stringify(bufferTurns).length} chars). ` +
+        `New system instruction: ${newInstruction.length} chars.`,
+      );
+      if (bufferTurns.length > 0) {
+        console.log(`[token] Volatile buffer turns:\n${bufferTurns.map((t, i) => `  ${i + 1}. [${t.role}]: ${t.text.slice(0, 120)}`).join('\n')}`);
+      }
+
       const hasRagDocuments = Boolean(documentConfigId);
       const token = await mintEphemeralToken(newInstruction, hasRagDocuments);
       const model = process.env.GEMINI_LIVE_MODEL ?? VOICE_CONFIG.model;
+      console.log(`[token] Switch complete — new ephemeral token minted. Model: ${model}.`);
 
       return NextResponse.json({ token, model });
     }

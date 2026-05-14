@@ -15,7 +15,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { generateObject } from 'ai';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { isAssistantId, type AssistantId } from '@/src/config/professorConfig';
-import { getSchemaForAssistant, type AnyAssistantState, type SessionMode } from '@/src/services/contextManager/index';
+import { getSchemaForAssistant, generateMarkdownSummary, type AnyAssistantState, type SessionMode } from '@/src/services/contextManager/index';
 
 // ── Environment config ────────────────────────────────────────────────────────
 const MEMORY_EXTRACTION_MODEL =
@@ -153,6 +153,12 @@ export async function POST(req: NextRequest) {
     const deltaText = deltaEntries.map((e) => `[${e.role}]: ${e.text}`).join('\n');
     const lastTurnIndex = deltaEntries[deltaEntries.length - 1].turnIndex;
 
+    const firstDeltaIndex = deltaEntries[0].turnIndex;
+    console.log(
+      `[compact] Extracting state from ${deltaEntries.length} turns (turns ${firstDeltaIndex}..${lastTurnIndex}) ` +
+      `using ${MEMORY_EXTRACTION_MODEL}. Total transcript: ${transcript.length} entries.`,
+    );
+
     const existingStateJSON = currentState
       ? JSON.stringify(currentState, null, 2)
       : 'null (first extraction — create the state from scratch)';
@@ -188,6 +194,11 @@ export async function POST(req: NextRequest) {
         });
         extractedObject = object as AnyAssistantState;
         extractionModel = modelName;
+        console.log(`[compact] Extraction succeeded with ${extractionModel}.`);
+        console.log(`[compact] Extracted JSON state:\n${JSON.stringify(extractedObject, null, 2)}`);
+        if (sessionMode) {
+          console.log(`[compact] Markdown summary:\n${generateMarkdownSummary(extractedObject, sessionMode)}`);
+        }
         break;
       } catch (err) {
         lastError = err;
