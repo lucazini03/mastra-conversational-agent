@@ -62,6 +62,7 @@ import {
   useState,
   type MutableRefObject,
 } from 'react';
+import { useRouter } from 'next/navigation';
 import type { AnyAssistantState, SessionMode } from '@/src/services/contextManager/index';
 import type { AssistantId } from '@/src/config/professorConfig';
 
@@ -172,6 +173,8 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
     onContextSwitch,
     onTurnComplete,
   } = opts;
+
+  const router = useRouter();
 
   // ── React state (drives UI re-renders) ──────────────────────────────────
   const [status, setStatus] = useState<GeminiLiveStatus>('idle');
@@ -395,6 +398,36 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
     ws: WebSocket,
     calls: Array<{ id: string; name: string; args: Record<string, unknown> }>,
   ): Promise<void> {
+    // ── Client-side navigation tool (intercept before backend calls) ─────
+    const navCall = calls.find((c) => c.name === 'start_study_session');
+    if (navCall) {
+      const topic = String(navCall.args?.topic ?? '').trim();
+      const durationMinutes = Number(navCall.args?.duration_minutes ?? 5);
+
+      // Acknowledge the command to Gemini so it doesn't hang waiting for a response.
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(
+          JSON.stringify({
+            toolResponse: {
+              functionResponses: [
+                {
+                  id: navCall.id,
+                  name: 'start_study_session',
+                  response: { status: 'navigating' },
+                },
+              ],
+            },
+          }),
+        );
+      }
+
+      // Navigate — the component will unmount and close the WS shortly after.
+      router.push(
+        `/study-session?topic=${encodeURIComponent(topic)}&duration=${durationMinutes}`,
+      );
+      return;
+    }
+
     const responses: Array<{ id: string; name: string; response: unknown }> = [];
 
     for (const call of calls) {

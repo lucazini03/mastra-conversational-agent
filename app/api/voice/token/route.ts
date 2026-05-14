@@ -36,7 +36,7 @@ import {
 // ── Token TTL ────────────────────────────────────────────────────────────────
 const TOKEN_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
-// ── Tool declaration exposed to Gemini Live ──────────────────────────────────
+// ── Tool declarations exposed to Gemini Live ─────────────────────────────────
 const SEARCH_DOCUMENTS_TOOL = {
   name: 'search_documents',
   description:
@@ -50,6 +50,26 @@ const SEARCH_DOCUMENTS_TOOL = {
       },
     },
     required: ['query'],
+  },
+};
+
+const START_STUDY_SESSION_TOOL = {
+  name: 'start_study_session',
+  description:
+    'Navigates the user to the dedicated study session interface. Call this tool when the user explicitly asks to start a timed study session on a specific topic.',
+  parameters: {
+    type: 'OBJECT' as const,
+    properties: {
+      topic: {
+        type: 'STRING' as const,
+        description: 'The subject the user wants to study (e.g., "World War 2", "Presentation Design").',
+      },
+      duration_minutes: {
+        type: 'NUMBER' as const,
+        description: 'The length of the study session in minutes.',
+      },
+    },
+    required: ['topic', 'duration_minutes'],
   },
 };
 
@@ -154,7 +174,10 @@ async function mintEphemeralToken(
     httpOptions: { apiVersion: 'v1alpha' },
   });
 
-  const tools = hasRagDocuments ? [{ functionDeclarations: [SEARCH_DOCUMENTS_TOOL] }] : [];
+  const functionDeclarations = hasRagDocuments
+    ? [SEARCH_DOCUMENTS_TOOL, START_STUDY_SESSION_TOOL]
+    : [START_STUDY_SESSION_TOOL];
+  const tools = [{ functionDeclarations }];
 
   const liveConfig: Record<string, unknown> = {
     responseModalities: ['AUDIO'],
@@ -169,11 +192,9 @@ async function mintEphemeralToken(
     realtimeInputConfig: {
       automaticActivityDetection: { disabled: true },
     },
+    tools,
   };
 
-  if (tools.length > 0) {
-    liveConfig.tools = tools;
-  }
 
   const tokenResponse = await ai.authTokens.create({
     config: {
