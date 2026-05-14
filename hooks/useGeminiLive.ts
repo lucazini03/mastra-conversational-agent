@@ -224,6 +224,9 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
   const switchAudioBufferRef = useRef<Buffer[]>([]);
   const pendingMicByteRef = useRef<Buffer | null>(null); // for byte-alignment
 
+  // Signals captured while wsRef is null during a context switch
+  const pendingTurnCompleteRef = useRef<boolean>(false);
+
   // Audio playback
   const audioCtxRef = useRef<AudioContext | null>(null);
   const nextPlaybackTimeRef = useRef<number>(0);
@@ -581,6 +584,9 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
           // Replay buffered mic audio to new session after a context switch.
           if (isSwitch && switchAudioBufferRef.current.length > 0) {
             console.log(`[GeminiLive] Replay di ${switchAudioBufferRef.current.length} chunk audio...`);
+            // In MANUAL VAD mode the client must bracket audio with activityStart/End.
+            // The activityEnd (or turnComplete) is sent below via the post-switch poke.
+            ws.send(JSON.stringify({ realtimeInput: { activityStart: {} } }));
             for (const chunk of switchAudioBufferRef.current) {
               wsSendAudio(ws, chunk);
             }
@@ -676,9 +682,12 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
             isContextSwitchingRef.current = true;
             switchAudioBufferRef.current = [];
 
-            // Update historical total with this WS's final count.
-            // DO NOT touch lastCompactionTokensRef — it was already frozen at trigger time.
-            historicalTokensRef.current += currentWsTokensRef.current;
+            // Anchor the historical baseline at the exact compaction trigger point.
+            // Using += currentWsTokensRef would be wrong here: interrupted turns report
+            // a lower promptTokenCount than the peak, making the post-switch cumulative
+            // drop below lastCompactionTokensRef and producing a negative delta.
+            // Using the frozen lastCompactionTokensRef guarantees delta restarts at ≥0.
+            historicalTokensRef.current = lastCompactionTokensRef.current;
             currentWsTokensRef.current = 0;
 
             // Persist compact state for future extractions.
@@ -733,7 +742,30 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
 
                 await connectGemini(token, true);
 
-                isContextSwitchingRef.current = false;
+                isContextSwitchingRef.current = false; // limbo ended
+
+                // ── Post-switch poke ───────────────────────────────────────
+                // If the user spoke or typed during the switch, the signals were
+                // dropped (wsRef was null). Send them now so Gemini responds
+                // instead of waiting in silence.
+                const pokeWs = wsRef.current;
+                if (pokeWs && pokeWs.readyState === WebSocket.OPEN) {
+                  if (pendingTurnCompleteRef.current) {
+                    // VAD speech-end captured during limbo → mirror signalSpeechEnd
+                    console.log('[GeminiLive] Poke (audio): activityEnd to new WS after switch.');
+                    pokeWs.send(JSON.stringify({ realtimeInput: { activityEnd: {} } }));
+                    pendingTurnCompleteRef.current = false;
+                  } else {
+                    const lastMsg = transcriptRef.current[transcriptRef.current.length - 1];
+                    if (lastMsg?.role === 'user') {
+                      // Text sent during limbo — transcript was captured but no turnComplete
+                      // was delivered to the new WS.
+                      console.log('[GeminiLive] Poke (text): turnComplete to new WS after switch.');
+                      pokeWs.send(JSON.stringify({ clientContent: { turnComplete: true } }));
+                    }
+                  }
+                }
+
                 contextSwitchCountRef.current++;
                 setContextSwitchCount(contextSwitchCountRef.current);
                 onContextSwitch?.(contextSwitchCountRef.current);
@@ -926,6 +958,13 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
   }, []);
 
   const signalSpeechEnd = useCallback(() => {
+    // If a context switch is in progress, wsRef is null — save the signal for
+    // the post-switch poke so Gemini doesn't silently wait on the new WS.
+    if (isContextSwitchingRef.current) {
+      console.log('[GeminiLive] VAD activityEnd during switch limbo — queuing poke.');
+      pendingTurnCompleteRef.current = true;
+      return;
+    }
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     ws.send(JSON.stringify({ realtimeInput: { activityEnd: {} } }));
@@ -985,6 +1024,7 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
     contextSwitchCountRef.current = 0;
     resumptionHandleRef.current = null;
     pendingMicByteRef.current = null;
+    pendingTurnCompleteRef.current = false;
     setContextSwitchCount(0);
 
     setStatus('connecting');
