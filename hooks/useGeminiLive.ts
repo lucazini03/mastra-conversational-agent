@@ -192,7 +192,9 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
   const isReconnectingRef = useRef<boolean>(false);
 
   // Token tracking
-  const cumulativeInputTokensRef = useRef<number>(0);
+  const historicalInputTokensRef = useRef<number>(0); // sum of final token counts from all previous WS connections
+  const currentTokenCountRef = useRef<number>(0);    // token count reported by the active WS
+  const cumulativeInputTokensRef = useRef<number>(0); // historical + current
   const lastSwitchTokenCountRef = useRef<number>(0);
 
   // Transcript (for compaction)
@@ -424,26 +426,38 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
       // ── Execute the WS swap ───────────────────────────────────────────
       isContextSwitchingRef.current = true;
       switchAudioBufferRef.current = [];
-      setStatus('switching');
+      // Do NOT call setStatus('switching') — keep status 'ready' so the UI stays responsive.
       emitStatus('Context switch in progress...');
+
+      // Save current WS token count into historical BEFORE closing the old WS.
+      // This ensures cumulativeInputTokensRef stays accurate across connections.
+      historicalInputTokensRef.current += currentTokenCountRef.current;
+      currentTokenCountRef.current = 0;
+      lastSwitchTokenCountRef.current = historicalInputTokensRef.current;
 
       // Update compaction state
       currentStateRef.current = compactState;
       lastExtractionTurnIndexRef.current = lastTurnIndex;
       isBufferingRef.current = false;
 
-      // Tear down old WS
+      // 🔇 Lobotomise the old WS before closing it.
+      // Without this, ws.onclose fires asynchronously with isSwitch=false
+      // and handleUnexpectedClose() opens a ghost WebSocket #3 that
+      // reconnects the OLD session, overwriting the new compacted one.
       const oldWs = wsRef.current;
       wsRef.current = null;
-      if (oldWs && oldWs.readyState !== WebSocket.CLOSED) {
-        oldWs.close(1000, 'context-switch');
+      if (oldWs) {
+        oldWs.onclose = null;
+        oldWs.onerror = null;
+        oldWs.onmessage = null;
+        if (oldWs.readyState !== WebSocket.CLOSED) {
+          oldWs.close(1000, 'context-switch');
+        }
       }
 
       // Open new WS
       await connectGemini(token, true);
 
-      // Update token accounting
-      lastSwitchTokenCountRef.current = cumulativeInputTokensRef.current;
       compactPromiseRef.current = null;
       newTokenForSwitchRef.current = null;
       isContextSwitchingRef.current = false;
@@ -610,10 +624,14 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
         if (!hasResolved && (isSetupComplete || hasServerContent)) {
           console.log('[GeminiLive] Setup confermato/Sessione attiva. Sblocco UI.');
           reconnectAttemptsRef.current = 0;
-          if (!isReconnectingRef.current) {
+          if (isSwitch) {
+            // Transparent switch — status stays 'ready', no message to avoid confusing the user.
+            console.log('[GeminiLive] Switch trasparente completato.');
+          } else if (!isReconnectingRef.current) {
             setStatus('ready');
-            emitStatus(isSwitch ? 'Sessione ripresa.' : 'Sessione avviata.');
+            emitStatus('Sessione avviata.');
           }
+          // else: reconnect — status/message handled by handleUnexpectedClose after connectGemini returns.
 
           // Replay buffered mic audio to new session after a context switch.
           if (isSwitch && switchAudioBufferRef.current.length > 0) {
@@ -669,10 +687,9 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
             usage.total_token_count ??
             0;
 
-          cumulativeInputTokensRef.current = Math.max(
-            cumulativeInputTokensRef.current,
-            promptTokens,
-          );
+          // Accumulate: historical tokens (from closed WS) + current WS tokens
+          currentTokenCountRef.current = promptTokens;
+          cumulativeInputTokensRef.current = historicalInputTokensRef.current + promptTokens;
 
           const delta = cumulativeInputTokensRef.current - lastSwitchTokenCountRef.current;
           if (delta >= TOKEN_THRESHOLD && !compactPromiseRef.current) {
@@ -735,6 +752,12 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
       ws.onclose = (event) => {
         clearTimeout(timeout);
         console.log(`[GeminiLive] WS CHIUSO. Code: ${event.code}, Reason: ${event.reason}`);
+
+        // Ignore voluntary closure triggered by a context switch — the new WS is already open.
+        if (event.reason === 'context-switch') {
+          console.log('[GeminiLive] WS chiuso volontariamente per context switch. Nessuna riconnessione.');
+          return;
+        }
 
         if (intentionalCloseRef.current) {
           safeResolve();
@@ -913,6 +936,8 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
     sessionModeRef.current = undefined;
 
     // Reset state
+    historicalInputTokensRef.current = 0;
+    currentTokenCountRef.current = 0;
     cumulativeInputTokensRef.current = 0;
     lastSwitchTokenCountRef.current = 0;
     transcriptRef.current = [];
