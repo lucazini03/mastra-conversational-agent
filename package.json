@@ -6,11 +6,7 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "dev": "next dev",
     "build": "next build",
-    "start": "next start",
-    "test:cli": "tsx src/client/cli.ts",
-    "mastra:dev": "mastra dev",
-    "mastra:build": "mastra build",
-    "mastra:start": "mastra start"
+    "start": "next start"
   },
   "keywords": [],
   "author": "",
