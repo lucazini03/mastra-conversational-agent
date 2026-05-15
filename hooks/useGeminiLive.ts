@@ -227,6 +227,13 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
   // Signals captured while wsRef is null during a context switch
   const pendingTurnCompleteRef = useRef<boolean>(false);
 
+  // Set to true immediately after a context switch completes so the first
+  // usageMetadata on the new WS re-baselines lastCompactionTokensRef to the
+  // actual new-session token count (mirrors old onWebSocketSwitched logic).
+  // Without this, the delta clock restarts from the OLD trigger baseline,
+  // making the threshold re-trigger immediately after 1–2 exchanges → infinite loop.
+  const justSwitchedRef = useRef<boolean>(false);
+
   // Audio playback
   const audioCtxRef = useRef<AudioContext | null>(null);
   const nextPlaybackTimeRef = useRef<number>(0);
@@ -642,6 +649,19 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
           currentWsTokensRef.current = promptTokens;
           const cumulative = historicalTokensRef.current + promptTokens;
 
+          // ── Post-switch re-baseline (mirrors old onWebSocketSwitched) ──────
+          // The first usageMetadata on the new WS reveals the actual compressed-
+          // context size.  Re-anchor lastCompactionTokensRef so the delta clock
+          // starts from 0 here, not from the old pre-switch trigger value.
+          // Without this, the compressed session (e.g. 4 k tokens) already sits
+          // close to the 5 k threshold, and the FIRST exchange crosses it again
+          // → extraction → switch → larger volatile buffer → same thing → ∞ loop.
+          if (justSwitchedRef.current) {
+            lastCompactionTokensRef.current = cumulative;
+            justSwitchedRef.current = false;
+            console.log(`[GeminiLive] Post-switch baseline set to ${cumulative} tokens (delta clock reset).`);
+          }
+
           const delta = cumulative - lastCompactionTokensRef.current;
           if (delta >= TOKEN_THRESHOLD && compactionStateRef.current === 'IDLE') {
             // 🔒 FREEZE the threshold snapshot NOW — before any async work.
@@ -743,6 +763,7 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
                 await connectGemini(token, true);
 
                 isContextSwitchingRef.current = false; // limbo ended
+                justSwitchedRef.current = true; // re-baseline token delta on first new-WS usageMetadata
 
                 // ── Post-switch poke ───────────────────────────────────────
                 // If the user spoke or typed during the switch, the signals were
@@ -750,20 +771,22 @@ export function useGeminiLive(opts: UseGeminiLiveOptions = {}): UseGeminiLiveRet
                 // instead of waiting in silence.
                 const pokeWs = wsRef.current;
                 if (pokeWs && pokeWs.readyState === WebSocket.OPEN) {
-                  if (pendingTurnCompleteRef.current) {
-                    // VAD speech-end captured during limbo → mirror signalSpeechEnd
-                    console.log('[GeminiLive] Poke (audio): activityEnd to new WS after switch.');
-                    pokeWs.send(JSON.stringify({ realtimeInput: { activityEnd: {} } }));
-                    pendingTurnCompleteRef.current = false;
-                  } else {
-                    const lastMsg = transcriptRef.current[transcriptRef.current.length - 1];
-                    if (lastMsg?.role === 'user') {
-                      // Text sent during limbo — transcript was captured but no turnComplete
-                      // was delivered to the new WS.
-                      console.log('[GeminiLive] Poke (text): turnComplete to new WS after switch.');
-                      pokeWs.send(JSON.stringify({ clientContent: { turnComplete: true } }));
-                    }
+                  const lastMsg = transcriptRef.current[transcriptRef.current.length - 1];
+                  const isLastMsgFromUser = lastMsg && lastMsg.role === 'user';
+
+                  // 🚨 FIX "EFFETTO ECO":
+                  // Facciamo il Poke SOLO se c'è un'interruzione VAD pendente
+                  // E l'ultimo messaggio NON è già dell'utente.
+                  // Se l'utente ha appena parlato, Gemini risponderà da solo!
+                  const needsPoke = pendingTurnCompleteRef.current && !isLastMsgFromUser;
+
+                  if (needsPoke) {
+                    console.log('[GeminiLive] 🚨 Risveglio forzato (Poke) inviato per sbloccare il silenzio.');
+                    pokeWs.send(JSON.stringify({ clientContent: { turnComplete: true } }));
                   }
+
+                  // Resettiamo i flag
+                  pendingTurnCompleteRef.current = false;
                 }
 
                 contextSwitchCountRef.current++;
