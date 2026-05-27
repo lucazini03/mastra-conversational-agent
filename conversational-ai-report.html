@@ -1,0 +1,984 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Conversational AI — MemorAIz Report</title>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,600;0,9..144,800;1,9..144,400&family=DM+Mono:wght@400;500&family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ink: #0f0e0d;
+    --paper: #f5f0e8;
+    --cream: #ede7d9;
+    --accent: #c8391a;
+    --accent-soft: #f0d5cf;
+    --gold: #b8860b;
+    --muted: #6b6356;
+    --border: #cfc8bc;
+    --section-bg: #faf7f2;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: 'Instrument Sans', sans-serif;
+    font-size: 17px;
+    line-height: 1.85;
+  }
+
+  .grain {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 999;
+    opacity: 0.03;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+    background-size: 200px;
+  }
+
+  .cover {
+    min-height: 100vh;
+    display: grid;
+    grid-template-rows: 1fr auto;
+    padding: 0;
+    position: relative;
+    overflow: hidden;
+    background: var(--ink);
+    color: var(--paper);
+  }
+
+  .cover-bg {
+    position: absolute;
+    inset: 0;
+    background:
+      radial-gradient(ellipse 80% 60% at 70% 30%, #2a1a0e 0%, transparent 60%),
+      radial-gradient(ellipse 60% 80% at 10% 80%, #1a0a05 0%, transparent 50%),
+      var(--ink);
+  }
+
+  .cover-accent-line {
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 4px;
+    background: linear-gradient(90deg, var(--accent) 0%, var(--gold) 100%);
+  }
+
+  .cover-content {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    padding: 80px 80px 60px;
+    max-width: 900px;
+  }
+
+  .cover-tag {
+    font-family: 'DM Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 48px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .cover-tag::before {
+    content: '';
+    display: inline-block;
+    width: 28px;
+    height: 1px;
+    background: var(--accent);
+  }
+
+  .cover-title {
+    font-family: 'Fraunces', serif;
+    font-size: clamp(52px, 8vw, 96px);
+    font-weight: 800;
+    line-height: 1;
+    letter-spacing: -0.02em;
+    color: var(--paper);
+    margin-bottom: 12px;
+  }
+
+  .cover-title em {
+    font-style: italic;
+    color: var(--accent);
+  }
+
+  .cover-subtitle {
+    font-family: 'Fraunces', serif;
+    font-size: clamp(20px, 3vw, 32px);
+    font-weight: 300;
+    color: #a09080;
+    margin-bottom: 56px;
+    line-height: 1.3;
+  }
+
+  .cover-desc {
+    max-width: 520px;
+    color: #8a7a6a;
+    font-size: 17px;
+    line-height: 1.85;
+  }
+
+  .cover-footer {
+    position: relative;
+    z-index: 1;
+    padding: 32px 80px;
+    border-top: 1px solid #2a2520;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .cover-footer-brand {
+    font-family: 'Fraunces', serif;
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--paper);
+  }
+
+  .cover-footer-brand span { color: var(--accent); }
+
+  .cover-footer-meta {
+    font-family: 'DM Mono', monospace;
+    font-size: 11px;
+    color: #5a4a3a;
+    letter-spacing: 0.08em;
+  }
+
+  .toc-section {
+    background: var(--cream);
+    padding: 80px 80px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .toc-label {
+    font-family: 'DM Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.25em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 40px;
+  }
+
+  .toc-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 2px;
+  }
+
+  .toc-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 16px;
+    padding: 20px 24px;
+    background: var(--paper);
+    cursor: default;
+    transition: background 0.2s;
+  }
+
+  .toc-item:hover { background: var(--accent-soft); }
+
+  .toc-num {
+    font-family: 'DM Mono', monospace;
+    font-size: 11px;
+    color: var(--accent);
+    min-width: 24px;
+    padding-top: 2px;
+  }
+
+  .toc-text {
+    font-family: 'Instrument Sans', sans-serif;
+    font-size: 16px;
+    font-weight: 500;
+    color: var(--ink);
+    line-height: 1.4;
+  }
+
+  .toc-sub {
+    font-size: 14px;
+    color: var(--muted);
+    font-weight: 400;
+    margin-top: 4px;
+  }
+
+  .main-content {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 0 80px;
+  }
+
+  .chapter {
+    padding: 80px 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .chapter:last-child { border-bottom: none; }
+
+  .chapter-header {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 32px;
+    align-items: start;
+    margin-bottom: 56px;
+  }
+
+  .chapter-num-block {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding-top: 4px;
+  }
+
+  .chapter-num {
+    font-family: 'Fraunces', serif;
+    font-size: 64px;
+    font-weight: 800;
+    color: var(--accent-soft);
+    line-height: 1;
+  }
+
+  .chapter-num-label {
+    font-family: 'DM Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--border);
+    writing-mode: vertical-rl;
+    transform: rotate(180deg);
+  }
+
+  .chapter-title-block {}
+
+  .chapter-eyebrow {
+    font-family: 'DM Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 10px;
+  }
+
+  .chapter-title {
+    font-family: 'Fraunces', serif;
+    font-size: clamp(28px, 4vw, 42px);
+    font-weight: 700;
+    line-height: 1.15;
+    color: var(--ink);
+    margin-bottom: 16px;
+  }
+
+  .chapter-intro {
+    font-size: 19px;
+    color: var(--muted);
+    max-width: 640px;
+    line-height: 1.85;
+  }
+
+  .subsection {
+    margin-bottom: 56px;
+  }
+
+  .subsection-header {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 28px;
+  }
+
+  .subsection-badge {
+    background: var(--accent);
+    color: white;
+    font-family: 'DM Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    padding: 4px 10px;
+    border-radius: 2px;
+    text-transform: uppercase;
+  }
+
+  .subsection-badge.b { background: var(--gold); }
+  .subsection-badge.c { background: var(--muted); }
+
+  .subsection-title {
+    font-family: 'Fraunces', serif;
+    font-size: 22px;
+    font-weight: 600;
+    color: var(--ink);
+  }
+
+  .obj-block {
+    background: var(--ink);
+    color: var(--paper);
+    padding: 24px 28px;
+    margin-bottom: 24px;
+    position: relative;
+  }
+
+  .obj-block::before {
+    content: 'OBIETTIVO';
+    position: absolute;
+    top: -1px; right: 20px;
+    font-family: 'DM Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 0.2em;
+    background: var(--accent);
+    color: white;
+    padding: 3px 8px;
+    transform: translateY(-50%);
+  }
+
+  .obj-text {
+    font-size: 16px;
+    line-height: 1.8;
+    color: #c8bfb0;
+  }
+
+  .content-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+
+  .info-card {
+    background: var(--section-bg);
+    border: 1px solid var(--border);
+    padding: 24px;
+  }
+
+  .info-card-title {
+    font-family: 'DM Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 14px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .info-list {
+    list-style: none;
+  }
+
+  .info-list li {
+    display: flex;
+    gap: 10px;
+    padding: 8px 0;
+    font-size: 15.5px;
+    color: var(--ink);
+    border-bottom: 1px dashed var(--border);
+    line-height: 1.65;
+  }
+
+  .info-list li:last-child { border-bottom: none; }
+
+  .info-list li::before {
+    content: '→';
+    color: var(--accent);
+    flex-shrink: 0;
+    font-size: 12px;
+    margin-top: 2px;
+  }
+
+  .todo-block {
+    border: 1px solid var(--gold);
+    background: #fdf9f0;
+    padding: 20px 24px;
+    margin-top: 20px;
+  }
+
+  .todo-title {
+    font-family: 'DM Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--gold);
+    margin-bottom: 12px;
+  }
+
+  .todo-list {
+    list-style: none;
+  }
+
+  .todo-list li {
+    display: flex;
+    gap: 10px;
+    padding: 7px 0;
+    font-size: 15.5px;
+    color: #5a4a20;
+    line-height: 1.65;
+  }
+
+  .todo-list li::before {
+    content: '□';
+    color: var(--gold);
+    flex-shrink: 0;
+  }
+
+  .para {
+    font-size: 17px;
+    color: var(--ink);
+    line-height: 1.9;
+    margin-bottom: 20px;
+    max-width: 720px;
+  }
+
+  .level-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 16px;
+    margin: 24px 0;
+  }
+
+  .level-card {
+    border: 1px solid var(--border);
+    background: var(--section-bg);
+    padding: 28px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .level-card::after {
+    content: '';
+    position: absolute;
+    top: 0; left: 0;
+    width: 3px;
+    height: 100%;
+    background: var(--accent);
+  }
+
+  .level-card.mid::after { background: var(--gold); }
+  .level-card.alt::after { background: var(--muted); }
+
+  .level-num {
+    font-family: 'DM Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.2em;
+    color: var(--muted);
+    margin-bottom: 10px;
+  }
+
+  .level-title {
+    font-family: 'Fraunces', serif;
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--ink);
+    margin-bottom: 10px;
+    line-height: 1.3;
+  }
+
+  .level-desc {
+    font-size: 15px;
+    color: var(--muted);
+    line-height: 1.75;
+    margin-bottom: 18px;
+  }
+
+  .pro-con {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+
+  .pro-side, .con-side {
+    background: white;
+    padding: 12px;
+    border-radius: 1px;
+  }
+
+  .pro-label {
+    font-family: 'DM Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: #4a8a4a;
+    margin-bottom: 8px;
+  }
+
+  .con-label {
+    font-family: 'DM Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 8px;
+  }
+
+  .pro-side ul, .con-side ul {
+    list-style: none;
+  }
+
+  .pro-side li, .con-side li {
+    font-size: 14px;
+    color: var(--ink);
+    line-height: 1.6;
+    padding: 4px 0;
+  }
+
+  .pro-side li::before { content: '+ '; color: #4a8a4a; }
+  .con-side li::before { content: '− '; color: var(--accent); }
+
+  .checklist-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 2px;
+  }
+
+  .check-item {
+    display: flex;
+    gap: 16px;
+    padding: 20px 24px;
+    background: var(--section-bg);
+    border-left: 2px solid var(--border);
+    transition: border-color 0.2s;
+  }
+
+  .check-item:hover { border-left-color: var(--accent); }
+
+  .check-num {
+    font-family: 'DM Mono', monospace;
+    font-size: 11px;
+    color: var(--accent);
+    min-width: 20px;
+    padding-top: 2px;
+  }
+
+  .check-content {}
+
+  .check-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--ink);
+    margin-bottom: 6px;
+  }
+
+  .check-detail {
+    font-size: 15px;
+    color: var(--muted);
+    line-height: 1.7;
+  }
+
+  .scenario-block {
+    background: var(--ink);
+    color: var(--paper);
+    padding: 36px 40px;
+    margin: 28px 0;
+    position: relative;
+  }
+
+  .scenario-block::before {
+    content: 'SCENARIO ESEMPIO';
+    position: absolute;
+    top: 20px; right: 20px;
+    font-family: 'DM Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 0.2em;
+    color: var(--accent);
+    opacity: 0.7;
+  }
+
+  .scenario-text {
+    font-family: 'Fraunces', serif;
+    font-style: italic;
+    font-size: 20px;
+    font-weight: 300;
+    line-height: 1.7;
+    color: #c8bfb0;
+  }
+
+  .scenario-text strong {
+    color: var(--paper);
+    font-style: normal;
+  }
+
+  .divider {
+    height: 1px;
+    background: var(--border);
+    margin: 36px 0;
+  }
+
+  .two-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin: 20px 0;
+  }
+
+  footer {
+    background: var(--ink);
+    color: #5a4a3a;
+    padding: 40px 80px;
+    text-align: center;
+    font-family: 'DM Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+  }
+
+  footer span { color: var(--accent); }
+
+  @media (max-width: 768px) {
+    .cover-content, .cover-footer, .toc-section, .main-content { padding-left: 24px; padding-right: 24px; }
+    .chapter-header { grid-template-columns: 1fr; }
+    .chapter-num { font-size: 40px; }
+    .content-grid, .two-col, .pro-con { grid-template-columns: 1fr; }
+    .cover-title { font-size: 42px; }
+    footer { padding: 32px 24px; }
+  }
+
+  .animate-in {
+    animation: fadeUp 0.6s ease both;
+  }
+
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(20px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+</style>
+</head>
+<body>
+
+<div class="grain"></div>
+
+<div class="cover">
+  <div class="cover-bg"></div>
+  <div class="cover-accent-line"></div>
+  <div class="cover-content animate-in">
+    <div class="cover-tag">MemorAIz — Documento Strategico</div>
+    <h1 class="cover-title">Conver<em>sational</em><br>AI</h1>
+    <p class="cover-subtitle">Roadmap di prodotto per l'integrazione<br>di agenti conversazionali</p>
+    <p class="cover-desc">Analisi delle opportunità, architettura proposta e checklist tecnica per la realizzazione di un'esperienza conversazionale vocale nativamente integrata nella piattaforma.</p>
+  </div>
+  <div class="cover-footer">
+    <div class="cover-footer-brand">Memor<span>AI</span>z</div>
+    <div class="cover-footer-meta">4 sezioni · 2025</div>
+  </div>
+</div>
+
+<div class="toc-section">
+  <div class="toc-label">Indice dei contenuti</div>
+  <div class="toc-grid">
+    <div class="toc-item">
+      <div class="toc-num">01</div>
+      <div class="toc-text">Onboarding Conversazionale
+        <div class="toc-sub">Pre-vendita (AI Strategist) e Post-acquisto (Setup guidato)</div>
+      </div>
+    </div>
+    <div class="toc-item">
+      <div class="toc-num">02</div>
+      <div class="toc-text">Integrazione nel Core AI
+        <div class="toc-sub">Tre livelli: Stateless, Context-Aware, Memoria Persistente</div>
+      </div>
+    </div>
+    <div class="toc-item">
+      <div class="toc-num">03</div>
+      <div class="toc-text">Gestione Proattiva della Sessione
+        <div class="toc-sub">L'AI prende l'iniziativa basandosi sui dati di sistema</div>
+      </div>
+    </div>
+    <div class="toc-item">
+      <div class="toc-num">04</div>
+      <div class="toc-text">Capacità Tecniche da Validare
+        <div class="toc-sub">Checklist per sviluppo e testing con Gemini Live</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="main-content">
+
+  <div class="chapter">
+    <div class="chapter-header">
+      <div class="chapter-num-block">
+        <div class="chapter-num">01</div>
+        <div class="chapter-num-label">Sezione</div>
+      </div>
+      <div class="chapter-title-block">
+        <div class="chapter-eyebrow">Conversational Onboarding</div>
+        <h2 class="chapter-title">Onboarding: Pre e Post Vendita</h2>
+        <p class="chapter-intro">L'obiettivo è sostituire form statici e tour guidati con un'interazione conversazionale vocale, sia nella fase di acquisizione che nella configurazione iniziale della piattaforma.</p>
+      </div>
+    </div>
+
+    <div class="subsection">
+      <div class="subsection-header">
+        <div class="subsection-badge">A</div>
+        <div class="subsection-title">Pre-acquisto: AI Strategist</div>
+      </div>
+
+      <div class="obj-block">
+        <div class="obj-text">Generazione di lead + consulenza personalizzata. L'AI si comporta come un esperto che aiuta l'utente a riconoscere e quantificare il valore del prodotto.</div>
+      </div>
+
+      <p class="para">Il possibile cliente dialoga con l'AI descrivendo le proprie difficoltà (es. gestione del tempo, sovraccarico di materiali, inefficienza nello studio). Al termine della conversazione, l'AI produce un report sintetico e personalizzato che mostra come MemorAIz potrebbe risolvere quei problemi specifici.</p>
+
+      <div class="content-grid">
+        <div class="info-card">
+          <div class="info-card-title">Output possibili</div>
+          <ul class="info-list">
+            <li>PDF personalizzato</li>
+            <li>Email riepilogativa</li>
+            <li>Dashboard preview con suggerimenti</li>
+          </ul>
+        </div>
+        <div class="info-card">
+          <div class="info-card-title">Leve persuasive da integrare</div>
+          <ul class="info-list">
+            <li>Risparmio di tempo</li>
+            <li>Riduzione dello stress</li>
+            <li>Miglioramento delle performance</li>
+            <li>Personalizzazione dell'esperienza</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="todo-block">
+        <div class="todo-title">Da definire</div>
+        <ul class="todo-list">
+          <li>Struttura del report finale</li>
+          <li>Che informazioni di contesto fornire all'assistente per sapere come i servizi risolvono le esigenze del cliente</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="subsection">
+      <div class="subsection-header">
+        <div class="subsection-badge b">B</div>
+        <div class="subsection-title">Post-acquisto: Set-up Conversazionale</div>
+      </div>
+
+      <div class="obj-block">
+        <div class="obj-text">Raccogliere i dati necessari per configurare la piattaforma tramite conversazione guidata, eliminando form tradizionali a favore di un'esperienza naturale e continua.</div>
+      </div>
+
+      <p class="para">L'utente completa il setup tramite conversazione guidata — "Chi sei?", "Cosa studi o lavori?", "Quali sono i tuoi obiettivi?" — con l'assistente che gestisce attivamente il flusso della sessione.</p>
+
+      <div class="info-card" style="margin-bottom:16px;">
+        <div class="info-card-title">Meccaniche di gestione sessione</div>
+        <ul class="info-list">
+          <li>Timer di sessione: se entro tot minuti non vengono raccolte tutte le informazioni, la sessione si interrompe</li>
+          <li>Checklist interna delle informazioni da raccogliere</li>
+          <li>Reminder gentili in caso di divagazione</li>
+          <li>Salvataggio strutturato e persistente di tutte le informazioni raccolte</li>
+        </ul>
+      </div>
+
+      <div class="todo-block">
+        <div class="todo-title">Da definire</div>
+        <ul class="todo-list">
+          <li>Gerarchia completa delle informazioni da raccogliere (obbligatorie e opzionali)</li>
+          <li>Tempistica del timer di sessione</li>
+          <li>Schema di salvataggio strutturato nel database</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="chapter">
+    <div class="chapter-header">
+      <div class="chapter-num-block">
+        <div class="chapter-num">02</div>
+        <div class="chapter-num-label">Sezione</div>
+      </div>
+      <div class="chapter-title-block">
+        <div class="chapter-eyebrow">Assistente di Base</div>
+        <h2 class="chapter-title">Integrazione nel Core AI</h2>
+        <p class="chapter-intro">L'agente conversazionale come feature intrinseca del pacchetto educational di MemorAIz, con tre livelli di profondità in base alle esigenze del cliente.</p>
+      </div>
+    </div>
+
+    <div class="level-cards">
+      <div class="level-card">
+        <div class="level-num">LIVELLO 01</div>
+        <div class="level-title">Real-time "Pure"<br><small style="font-weight:400;font-size:13px;">Stateless</small></div>
+        <div class="level-desc">Interazione in tempo reale senza memoria. Ogni sessione è indipendente, simile alla Modalità Vocale di ChatGPT. Obiettivo: supporto rapido e generico.</div>
+        <div class="pro-con">
+          <div class="pro-side">
+            <div class="pro-label">Pro</div>
+            <ul>
+              <li>Semplicità</li>
+              <li>Velocità</li>
+              <li>Costi ridotti</li>
+            </ul>
+          </div>
+          <div class="con-side">
+            <div class="con-label">Contro</div>
+            <ul>
+              <li>Nessuna personalizzazione</li>
+              <li>Esperienza limitata</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      <div class="level-card mid">
+        <div class="level-num">LIVELLO 02</div>
+        <div class="level-title">Context-Aware<br><small style="font-weight:400;font-size:13px;">Short-term Memory</small></div>
+        <div class="level-desc">L'AI è consapevole del contesto attuale: calendario, esami, urgenze, piano di studi. Obiettivo: aumentare la pertinenza immediata dell'interazione.</div>
+        <div class="pro-con">
+          <div class="pro-side">
+            <div class="pro-label">Pro</div>
+            <ul>
+              <li>Maggiore utilità</li>
+              <li>Più naturale</li>
+            </ul>
+          </div>
+          <div class="con-side">
+            <div class="con-label">Contro</div>
+            <ul>
+              <li>Complessità tecnica</li>
+              <li>Memoria limitata</li>
+              <li>Gestione dati complessa</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      <div class="level-card alt">
+        <div class="level-num">OPZIONE ALT.</div>
+        <div class="level-title">Memoria Persistente<br><small style="font-weight:400;font-size:13px;">Long-term + Update</small></div>
+        <div class="level-desc">L'AI mantiene memoria delle interazioni passate, progressi e preferenze, aggiornandola a fine conversazione. Crea continuità e relazione naturale (vocale) con l'utente.</div>
+        <div class="pro-con">
+          <div class="pro-side">
+            <div class="pro-label">Pro</div>
+            <ul>
+              <li>Continuità reale</li>
+              <li>Relazione con l'utente</li>
+            </ul>
+          </div>
+          <div class="con-side">
+            <div class="con-label">Contro</div>
+            <ul>
+              <li>Alta complessità</li>
+              <li>Privacy e storage</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="todo-block" style="margin-top:8px;">
+      <div class="todo-title">Domande aperte sul Livello 2</div>
+      <ul class="todo-list">
+        <li>Quanto è facile passare in contesto le sessioni di studio pianificate?</li>
+        <li>Quanto è in grado l'AI di pianificare e proporre attività in modo autonomo?</li>
+        <li>Cosa riusciamo a dargli effettivamente in input dal database?</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="chapter">
+    <div class="chapter-header">
+      <div class="chapter-num-block">
+        <div class="chapter-num">03</div>
+        <div class="chapter-num-label">Sezione</div>
+      </div>
+      <div class="chapter-title-block">
+        <div class="chapter-eyebrow">Modalità Proattiva</div>
+        <h2 class="chapter-title">Gestione Proattiva della Sessione</h2>
+        <p class="chapter-intro">L'AI assume un ruolo attivo, guidando e accogliendo l'utente invece di limitarsi a rispondere. Non aspetta l'input: prende l'iniziativa basandosi sui dati di sistema.</p>
+      </div>
+    </div>
+
+    <div class="scenario-block">
+      <div class="scenario-text">
+        L'AI ti accoglie ricordandoti che <strong>mancano 30 giorni all'esame</strong> e propone un piano basato sul tempo rimasto e sul carico di lavoro previsto. Se l'utente risponde "oggi ho poco tempo", l'AI ricalibrla istantaneamente passando da una sessione completa a <strong>quiz rapidi</strong>.
+      </div>
+    </div>
+
+    <div class="content-grid" style="margin-top:24px;">
+      <div class="info-card">
+        <div class="info-card-title">Meccaniche proattive</div>
+        <ul class="info-list">
+          <li>Accoglienza contestuale all'avvio sessione</li>
+          <li>Proposta piano basata su scadenze e carico</li>
+          <li>Negoziazione obiettivo in tempo reale</li>
+          <li>Ricalibrazione istantanea in base all'input utente</li>
+        </ul>
+      </div>
+      <div class="info-card">
+        <div class="info-card-title">Libertà dell'utente</div>
+        <ul class="info-list">
+          <li>Non obbligatorio usare la modalità proattiva</li>
+          <li>Possibilità di lavorare/studiare liberamente</li>
+          <li>L'utente può rifiutare la proposta dell'AI</li>
+          <li>L'AI si adatta senza forzare il flusso</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="todo-block">
+      <div class="todo-title">Da definire</div>
+      <ul class="todo-list">
+        <li>Quali parametri del database iniettare nel prompt di sistema all'avvio (date esami, log di studio)</li>
+        <li>Come strutturare la negoziazione dell'obiettivo nel prompt</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="chapter">
+    <div class="chapter-header">
+      <div class="chapter-num-block">
+        <div class="chapter-num">04</div>
+        <div class="chapter-num-label">Sezione</div>
+      </div>
+      <div class="chapter-title-block">
+        <div class="chapter-eyebrow">Gemini / Multimodal Live API</div>
+        <h2 class="chapter-title">Capacità Tecniche da Validare</h2>
+        <p class="chapter-intro">Checklist per lo sviluppo e il testing. Per realizzare quanto descritto nelle sezioni precedenti, è necessario validare le potenzialità di Gemini Live su questi punti chiave.</p>
+      </div>
+    </div>
+
+    <div class="checklist-grid">
+      <div class="check-item">
+        <div class="check-num">01</div>
+        <div class="check-content">
+          <div class="check-title">Context Injection</div>
+          <div class="check-detail">Quanto testo/dati possiamo passare a Gemini all'inizio di una sessione Live per renderlo consapevole dell'utente senza rallentare la risposta?</div>
+        </div>
+      </div>
+
+      <div class="check-item">
+        <div class="check-num">02</div>
+        <div class="check-content">
+          <div class="check-title">Tool Use in Real-time</div>
+          <div class="check-detail">Gemini Live può chiamare funzioni complesse (es. <code style="font-family:'DM Mono',monospace;font-size:11px;background:#eee;padding:1px 4px;">set_study_session()</code>) mentre parla? È integrabile con le codebase attuali?</div>
+        </div>
+      </div>
+
+      <div class="check-item">
+        <div class="check-num">03</div>
+        <div class="check-content">
+          <div class="check-title">Instruction Following</div>
+          <div class="check-detail">Quanto è preciso nel "rimanere nel personaggio" e nell'insistere gentilmente per raccogliere le informazioni di onboarding senza divagare?</div>
+        </div>
+      </div>
+
+      <div class="check-item">
+        <div class="check-num">04</div>
+        <div class="check-content">
+          <div class="check-title">Potenzialità generali</div>
+          <div class="check-detail">Caricamento file in real-time; alternanza chat scritta/modalità parlata; soluzione al problema della trascrizione incorretta con visualizzazione a schermo.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<footer>
+  <span>MemorAIz</span> · Documento Strategico Interno · Conversational AI Roadmap
+</footer>
+
+</body>
+</html>

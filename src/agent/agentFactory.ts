@@ -8,7 +8,7 @@
 
 import { Agent } from '@mastra/core/agent';
 import { GeminiLiveVoice } from '@mastra/voice-google-gemini-live';
-import { INTERVIEW_COACH_INSTRUCTIONS, VOICE_CONFIG } from '../config/interviewConfig.js';
+import { VOICE_CONFIG } from '../config/interviewConfig.js';
 
 type CreateInterviewAgentOptions = {
   instructions?: string;
@@ -106,8 +106,8 @@ export function createInterviewAgent(options: CreateInterviewAgentOptions = {}):
     throw new Error('GEMINI_LIVE_API_KEY is required. Copy .env.example to .env and fill it in.');
   }
 
-  const instructions = options.instructions ?? INTERVIEW_COACH_INSTRUCTIONS;
-  const name = options.name ?? 'MemorAIz Interview Coach';
+  const instructions = options.instructions ?? '';
+  const name = options.name ?? 'MemorAIz';
 
   const liveModel = (process.env.GEMINI_LIVE_MODEL ?? VOICE_CONFIG.model)
     .replace(/^models\//, '') as any;

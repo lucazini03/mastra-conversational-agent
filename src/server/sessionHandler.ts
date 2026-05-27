@@ -17,19 +17,16 @@
 //   Server  → Browser { type: 'status',     message: string }
 //   Server  → Browser { type: 'error',      message: string }
 //   Server  → Browser { type: 'tts_audio',  data: string }    ← base64 Int16 PCM, 24kHz mono
-//   Server  → Browser { type: 'interview_feedback', markdown: string }
 //   Server  → Browser { type: 'practice_ready', context: object }
 //   Server  → Browser { type: 'feedback_ready', context: object, reviewDemoId: string }
 
 import { WebSocket, type RawData } from 'ws';
-import { rm } from 'node:fs/promises';
-import { generateText, generateObject } from 'ai';
+import { generateObject } from 'ai';
 import { z } from 'zod';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { createInterviewAgent, type InterviewAgent } from '../agent/agentFactory.js';
 import {
   DEFAULT_ASSISTANT_ID,
-  INTERVIEW_COACH_PROMPT,
   CIAO_DEMO_LABELS,
   CIAO_DEMO_OPENING_PROMPTS,
   getDemoPrompt,
@@ -39,7 +36,6 @@ import {
   type AnyDemoId,
   type DemoPromptOptions,
 } from '../config/interviewConfig.js';
-import { documentService, type InterviewStructure } from './documentService.js';
 import { SessionCostTracker } from './sessionCostTracker.js';
 import { SessionLogger } from './sessionLogger.js';
 import {
@@ -49,15 +45,10 @@ import {
   type AnyAssistantState,
 } from '../services/contextManager/index.js';
 import { appendSessionToLog } from './usageTracker.js';
-import type { UploadedDocumentConfig } from './documentConfigStore.js';
 
 const RECONNECT_DELAY_MS = 1500;
 
 const MAX_RECONNECT_ATTEMPTS = 5;
-
-type SessionHandlerDeps = {
-  consumeDocumentConfig: (configId: string) => Promise<UploadedDocumentConfig | null>;
-};
 
 export class SessionHandler {
   private ws: WebSocket;
@@ -71,14 +62,9 @@ export class SessionHandler {
   private isContextSwitching = false;
   private costTracker = new SessionCostTracker();
   private sessionCostSummarySent = false;
-  private selectedAssistantId: AnyDemoId = DEFAULT_ASSISTANT_ID;
-  private uploadedDocumentDir: string | null = null;
-  private readonly deps: SessionHandlerDeps;
+  private selectedAssistantId: AnyDemoId = 'demo_1';
 
-  private jobDescriptionText: string | null = null;
-  private interviewStructure: InterviewStructure | null = null;
-  private transcriptLines: Array<{ role: 'user' | 'model'; text: string }> = [];
-  private feedbackSent = false;
+  private selectedDifficulty: string = 'easy';
 
   private enrichedInstructions: string | null = null;
 
@@ -103,10 +89,9 @@ export class SessionHandler {
   // consumed once on the next start_session('demo_N_review') call.
   private pendingFeedbackContext: unknown | null = null;
 
-  constructor(ws: WebSocket, sessionId: string, deps: SessionHandlerDeps) {
+  constructor(ws: WebSocket, sessionId: string) {
     this.ws = ws;
     this.sessionId = sessionId;
-    this.deps = deps;
     this.setupWebSocketListeners();
     console.log(`[${this.sessionId}] Session created`);
   }
@@ -175,7 +160,7 @@ export class SessionHandler {
         const rawDemoId = typeof msg.demoId === 'string' ? msg.demoId.trim() : '';
         this.selectedAssistantId = isCiaoAssistantId(rawDemoId)
           ? rawDemoId
-          : DEFAULT_ASSISTANT_ID;
+          : 'demo_1';
         // Client may pass back a practice context extracted in a prior session.
         if (msg.practiceContext !== undefined) {
           this.pendingPracticeContext = msg.practiceContext;
@@ -184,12 +169,15 @@ export class SessionHandler {
         if (msg.feedbackContext !== undefined) {
           this.pendingFeedbackContext = msg.feedbackContext;
         }
-        await this.startSession(msg.documentConfigId);
+        // Accept difficulty override from client.
+        if (typeof msg.difficulty === 'string' && ['easy', 'medium', 'hard'].includes(msg.difficulty)) {
+          this.selectedDifficulty = msg.difficulty;
+        }
+        await this.startSession();
         break;
       }
       case 'end_session':
         this.intentionalClose = true;
-        await this.generateAndSendFeedback();
         await this.cleanup();
         if (this.ws.readyState === WebSocket.OPEN) this.ws.close();
         break;
@@ -312,33 +300,16 @@ export class SessionHandler {
 
   // ─── Session Lifecycle ──────────────────────────────────────────────────────
 
-  private async startSession(documentConfigId?: string) {
+  private async startSession() {
     if (this.agent || this.isStarting) {
       this.sendStatus('Session already active');
       return;
     }
 
-    const uploadConfig = await this.resolveUploadConfig(documentConfigId);
-    if (documentConfigId && !uploadConfig) {
-      this.sendJSON({
-        type: 'error',
-        message: 'Document selection expired. Please re-upload the file and restart the session.',
-      });
-      return;
-    }
-
-    this.uploadedDocumentDir = uploadConfig?.uploadDir ?? null;
-
     this.intentionalClose = false;
     this.reconnectAttempts = 0;
     this.costTracker.reset();
     this.sessionCostSummarySent = false;
-    this.transcriptLines = [];
-    this.feedbackSent = false;
-    this.jobDescriptionText = null;
-
-    // ── CIAO demos: use the demo-specific system prompt, no doc upload needed ──
-    const isCiaoDemo = isCiaoAssistantId(this.selectedAssistantId);
 
     // Consume any stored practice context (set by initiate_practice flow).
     const practiceOpts: DemoPromptOptions = {};
@@ -357,10 +328,7 @@ export class SessionHandler {
       this.pendingFeedbackContext = null;
     }
 
-    const contextFiles = uploadConfig?.contextFiles ?? [];
-    let instructions = isCiaoDemo
-      ? getDemoPrompt(this.selectedAssistantId as CiaoAssistantId, undefined, practiceOpts)
-      : INTERVIEW_COACH_PROMPT;
+    const instructions = getDemoPrompt(this.selectedAssistantId as CiaoAssistantId, this.selectedDifficulty as import('../config/interviewConfig.js').DifficultyLevel, practiceOpts);
     const initialState: AnyAssistantState = {
       behavioral_directives: [],
       user_language: '',
@@ -370,40 +338,15 @@ export class SessionHandler {
       overall_impression: '',
     } as AnyAssistantState;
 
-    if (!isCiaoDemo && contextFiles.length > 0) {
-      try {
-        const docs = await documentService.getDocumentsHashAndText(contextFiles);
-        if (docs.text.trim().length > 0) {
-          this.jobDescriptionText = docs.text;
-
-          const structureResult = await documentService.generateInterviewStructure(docs.text);
-          if (structureResult.structure) {
-            this.interviewStructure = structureResult.structure;
-            instructions =
-              INTERVIEW_COACH_PROMPT +
-              `\n\n## Job Description\n\n${docs.text}\n\n## Interview Plan\n\n${JSON.stringify(structureResult.structure, null, 2)}`;
-          } else {
-            instructions = INTERVIEW_COACH_PROMPT + `\n\n## Job Description\n\n${docs.text}`;
-          }
-        }
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        console.warn(`[${this.sessionId}] Failed to load job description: ${message}`);
-      }
-    }
-
     const markdown = generateMarkdownSummary(initialState);
-    instructions += '\n\n---\n' + markdown;
+    const enrichedInstructions = instructions + '\n\n---\n' + markdown;
 
-    this.enrichedInstructions = instructions;
+    this.enrichedInstructions = enrichedInstructions;
 
     this.contextManager = new ContextManager({
       sessionId: this.sessionId,
-      // ContextManager's assistantId drives schema selection for memory compaction.
-      // CIAO demos reuse the interview_coach schema (generic state shape).
-      assistantId: isCiaoAssistantId(this.selectedAssistantId)
-        ? DEFAULT_ASSISTANT_ID
-        : (this.selectedAssistantId as AssistantId),
+      // All demos use the interview_coach schema shape for memory compaction.
+      assistantId: DEFAULT_ASSISTANT_ID,
       baseSystemPrompt: instructions,
     });
     this.contextManager.setInitialState(initialState);
@@ -428,7 +371,7 @@ export class SessionHandler {
         this.sendStatus(`Connecting to ${this.getAssistantLabel(this.selectedAssistantId)}...`);
       }
 
-      const instructions = this.enrichedInstructions ?? INTERVIEW_COACH_PROMPT;
+      const instructions = this.enrichedInstructions ?? '';
       createdAgent = createInterviewAgent({
         instructions,
         name: this.getAssistantLabel(this.selectedAssistantId),
@@ -479,7 +422,6 @@ export class SessionHandler {
         console.log(`[${this.sessionId}] ${role}: ${text}`);
         if (role === 'user' || role === 'model') {
           this.contextManager?.addTranscriptEntry(role, text);
-          this.transcriptLines.push({ role, text });
         }
         this.sessionLogger?.addTranscriptLine(role === 'user' ? 'user' : 'model', text);
       });
@@ -694,7 +636,6 @@ export class SessionHandler {
         this.sendJSON({ type: 'transcript', role, text });
         if (role === 'user' || role === 'model') {
           this.contextManager?.addTranscriptEntry(role, text);
-          this.transcriptLines.push({ role, text });
         }
         this.sessionLogger?.addTranscriptLine(role === 'user' ? 'user' : 'model', text);
       });
@@ -970,8 +911,6 @@ export class SessionHandler {
     this.contextManager?.addTranscriptEntry(role, text);
     // Audio transcriptions are the primary transcript source in voice mode.
     this.sessionLogger?.addTranscriptLine(role, text);
-    // Capture for end-of-session feedback generation.
-    this.transcriptLines.push({ role, text });
   }
 
   private mirrorAutomaticTranscriptions(data: any) {
@@ -1074,24 +1013,7 @@ export class SessionHandler {
       console.log(`[${this.sessionId}] Interview agent destroyed`);
     }
 
-    if (this.uploadedDocumentDir) {
-      try {
-        await rm(this.uploadedDocumentDir, { recursive: true, force: true });
-      } catch {
-        // Best-effort cleanup of temporary uploads.
-      }
-      this.uploadedDocumentDir = null;
-    }
-
     await sessionLogPromise;
-  }
-
-  private async resolveUploadConfig(
-    documentConfigId?: string,
-  ): Promise<UploadedDocumentConfig | null> {
-    const normalizedId = documentConfigId?.trim();
-    if (!normalizedId) return null;
-    return this.deps.consumeDocumentConfig(normalizedId);
   }
 
   private emitSessionCostSummary() {
@@ -1150,37 +1072,6 @@ export class SessionHandler {
     });
   }
 
-  private async generateAndSendFeedback(): Promise<void> {
-    // Feedback generation only applies to the interview coach demo.
-    if (isCiaoAssistantId(this.selectedAssistantId)) return;
-    if (this.feedbackSent || this.transcriptLines.length === 0) return;
-    this.feedbackSent = true;
-
-    const transcript = this.transcriptLines
-      .map((l) => `${l.role === 'user' ? 'Candidate' : 'Interviewer'}: ${l.text}`)
-      .join('\n');
-
-    const jdSection = this.jobDescriptionText
-      ? `\n\n## Job Description\n\n${this.jobDescriptionText}`
-      : '';
-
-    const prompt = `You are an expert interview coach. Analyze the following interview transcript and provide a structured feedback report in Markdown format.${jdSection}\n\n## Interview Transcript\n\n${transcript}\n\nWrite a concise feedback report with these sections:\n1. Overall Assessment\n2. Strengths\n3. Areas for Improvement\n4. Key Recommendation`;
-
-    try {
-      const google = createGoogleGenerativeAI({
-        apiKey: process.env.GEMINI_LLM_API_KEY ?? process.env.GEMINI_LIVE_API_KEY ?? '',
-      });
-      const { text: markdown } = await generateText({
-        model: google('gemini-3.1-flash-lite-preview'),
-        prompt,
-      });
-      this.sendJSON({ type: 'interview_feedback', markdown });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(`[${this.sessionId}] generateAndSendFeedback failed:`, message);
-    }
-  }
-
   private sendJSON(obj: object) {
     if (this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(obj));
@@ -1192,18 +1083,11 @@ export class SessionHandler {
   }
 
   private getAssistantLabel(assistantId: AnyDemoId): string {
-    if (isCiaoAssistantId(assistantId)) {
-      return CIAO_DEMO_LABELS[assistantId];
-    }
-    return 'Interview Coach';
+    return CIAO_DEMO_LABELS[assistantId];
   }
 
   private getOpeningPrompt(assistantId: AnyDemoId): string {
-    if (isCiaoAssistantId(assistantId)) {
-      return CIAO_DEMO_OPENING_PROMPTS[assistantId];
-    }
-    const roleTitle = this.interviewStructure?.role_title ?? 'the position';
-    return `Greet the candidate warmly, introduce yourself as their interviewer for the ${roleTitle} role, and ask only for their name to get started. Do not ask what role they are applying for.`;
+    return CIAO_DEMO_OPENING_PROMPTS[assistantId];
   }
 
   // ─── Practice Session Extraction ────────────────────────────────────────────

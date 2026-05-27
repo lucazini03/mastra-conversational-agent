@@ -126,6 +126,7 @@
 
   // ── Transcript helpers ────────────────────────────────────────────────────
   const transcriptLog = document.getElementById('transcriptLog');
+  const transcriptArea = document.getElementById('transcriptArea');
   const transcriptEmpty = document.getElementById('transcriptEmpty');
 
   function mergeTranscriptText(previous, incoming) {
@@ -158,7 +159,7 @@
     wrap.appendChild(label);
     wrap.appendChild(body);
     transcriptLog.appendChild(wrap);
-    transcriptLog.scrollTop = transcriptLog.scrollHeight;
+    if (transcriptArea) transcriptArea.scrollTop = transcriptArea.scrollHeight;
     return { wrap, body };
   }
 
@@ -167,6 +168,14 @@
     const now = Date.now();
     const normalizedText = String(text ?? '').trim();
     if (!normalizedText) return;
+    if (role !== 'model') {
+      // Still accumulate data but don't show user turns in the UI.
+      if (DEMO_ID === 'demo_4' || DEMO_ID === 'demo_4_practice' ||
+          DEMO_ID === 'demo_1' || DEMO_ID === 'demo_2' || DEMO_ID === 'demo_3') {
+        transcriptLinesData.push({ role, text: normalizedText });
+      }
+      return;
+    }
 
     if (
       lastTranscriptEntry &&
@@ -177,7 +186,7 @@
       lastTranscriptEntry.text = merged;
       lastTranscriptEntry.at = now;
       if (lastTranscriptEntry.bodyEl) lastTranscriptEntry.bodyEl.textContent = merged;
-      transcriptLog.scrollTop = transcriptLog.scrollHeight;
+      if (transcriptArea) transcriptArea.scrollTop = transcriptArea.scrollHeight;
       return;
     }
 
@@ -464,6 +473,7 @@
           type: 'start_session',
           demoId: 'demo_4_practice',
           practiceContext: context,
+          difficulty: selectedDifficulty,
         }));
         startConversationTimer();
         setDisabled(stopBtn, false);
@@ -501,6 +511,7 @@
           type: 'start_session',
           demoId: reviewDemoId,
           feedbackContext: context,
+          difficulty: selectedDifficulty,
         }));
         startConversationTimer();
         setDisabled(stopBtn, false);
@@ -660,7 +671,7 @@
         if (!IS_WALKIE_TALKIE) {
           await startMicCapture();
         }
-        ws.send(JSON.stringify({ type: 'start_session', demoId: DEMO_ID }));
+        ws.send(JSON.stringify({ type: 'start_session', demoId: DEMO_ID, difficulty: selectedDifficulty }));
         startConversationTimer();
         setDisabled(stopBtn, false);
         if (IS_WALKIE_TALKIE) {

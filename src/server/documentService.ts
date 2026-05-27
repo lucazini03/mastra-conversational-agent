@@ -36,22 +36,6 @@ export const DocumentIndexSchema = z.object({
 
 export type DocumentIndex = z.infer<typeof DocumentIndexSchema>;
 
-export const InterviewStructureSchema = z.object({
-  role_title: z.string().describe('The exact job title from the job description.'),
-  company_name: z.string().describe('Company name extracted from the job description, or empty string if not found.'),
-  culture_notes: z.string().describe('Brief notes on company culture, values, or team dynamics mentioned in the JD.'),
-  job_responsibilities: z.array(z.string()).describe('Key responsibilities listed in the JD.'),
-  required_skills: z.array(z.string()).describe('Specific skills, qualifications, or technologies mentioned in the JD.'),
-  required_experience: z.string().describe('Summary of required experience level and background.'),
-  phases: z.array(z.object({
-    phase_name: z.string().describe('Name of this interview phase (e.g. "Introduction", "Technical Deep-Dive", "Behavioural", "Closing").'),
-    question_seeds: z.array(z.string()).describe('3-5 representative questions to ask in this phase, grounded in the JD.'),
-    //evaluation_criteria: z.array(z.string()).describe('2-3 criteria to assess the candidate on in this phase.'),
-  })).describe('Ordered interview phases covering the full conversation flow.'),
-});
-
-export type InterviewStructure = z.infer<typeof InterviewStructureSchema>;
-
 export type DocsContent = {
   /** SHA-256 of the combined, normalised text of all PDFs. */
   hash: string;
@@ -64,11 +48,6 @@ export type DocsContent = {
 export type SummaryResult = {
   index: DocumentIndex | null;
   /** Non-null only when generation ran (not served from disk cache). */
-  generationTokens: { input: number; output: number } | null;
-};
-
-export type InterviewStructureResult = {
-  structure: InterviewStructure | null;
   generationTokens: { input: number; output: number } | null;
 };
 
@@ -202,88 +181,6 @@ class DocumentService {
         err instanceof Error ? err.message : String(err),
       );
       return { index: null, generationTokens: null };
-    }
-  }
-  /**
-   * Generates (and caches) a structured interview plan for the given job
-   * description text. Results are cached by content hash so repeated calls
-   * within the same or future process lifetimes are instant.
-   */
-  async generateInterviewStructure(text: string): Promise<InterviewStructureResult> {
-    if (!text.trim()) return { structure: null, generationTokens: null };
-
-    const hash = createHash('sha256').update(text).digest('hex');
-    await fs.mkdir(SUMMARIES_DIR, { recursive: true });
-    const cacheFile = path.join(SUMMARIES_DIR, `${hash}_job_description.json`);
-
-    try {
-      const raw = await fs.readFile(cacheFile, 'utf-8');
-      const parsed = InterviewStructureSchema.safeParse(JSON.parse(raw));
-      if (parsed.success) {
-        console.log(`[DocumentService] Interview structure cache hit (hash ${hash.slice(0, 12)}...)`);
-        return { structure: parsed.data, generationTokens: null };
-      }
-    } catch {
-      // File absent or corrupt — fall through to generation.
-    }
-
-    console.log(`[DocumentService] Generating interview structure (hash ${hash.slice(0, 12)}...)...`);
-    try {
-      const google = this.getGoogleClient();
-      const model = google('gemini-3.1-flash-lite-preview');
-
-      const { object, usage } = await generateObject({
-        model,
-        schema: InterviewStructureSchema,
-        prompt: [
-          'You are an elite Talent Acquisition Director and Domain-Specific Senior Interviewer. Your task is to design a highly realistic, tailored interview plan based on the provided Job Description (JD).',
-          '',
-          'Before writing the plan, analyze the company and the role. You must adapt the interview structure to match real-world practices for that specific company type (e.g., Big Tech uses Leetcode/System Design + core principles; Academia requires research/chalk talks; Startups focus on agility and portfolio impact).',
-          '',
-          'OUTPUT FORMAT:',
-          '',
-          '[COMPANY & ROLE ANALYSIS]',
-          'Briefly state the inferred company culture, the standard industry interview format for this specific tier/role, and the top 3 core competencies to be assessed.',
-          '',
-          '[THE INTERVIEW PLAN]',
-          'REQUIRED STRUCTURE — strictly follow these phases in order:',
-          '',
-          '1. Introduction',
-          '- The interviewer asks the candidate to introduce themselves, describe their career path, and explain their motivation for this specific role and company. (Do NOT ask what role they are applying for).',
-          '- Include 2-3 specific question seeds probing their background, trajectory, and motivation based on the JD.',
-          '- Evaluation: What specific green flags and red flags should the interviewer listen for here?',
-          '',
-          '2. Role-Specific Assessment Phases (2-4 Phases)',
-          "- Create 2 to 4 distinct phases drawn directly from the JD's skills, responsibilities, and the company's likely culture (e.g., System Design, Problem Solving, Leadership Principles, Domain Knowledge, or Situational).",
-          '- For each phase, provide 4-5 specific question seeds.',
-          '- Evaluation: For each phase, provide concrete, measurable "Positive Signals" (what a great answer looks like) and "Red Flags".',
-          '',
-          '3. Closing',
-          '- The interviewer wraps up and invites the candidate to ask questions.',
-          '- Include 1-2 question seeds the interviewer can use to close naturally and gauge the candidate\'s strategic curiosity about the company.',
-          '',
-          'RULES:',
-          '- Grounding: Every single question seed must be traceable to a concrete skill, responsibility, or value mentioned in the JD.',
-          '- No Cliches: Absolutely no generic questions (e.g., "Where do you see yourself in 5 years?", "What is your biggest weakness?"). Frame them as situational or behavioral challenges related to the JD.',
-          '- Realism: Mimic the actual tone and rigor expected at the target company.',
-          '',
-          'JOB DESCRIPTION:',
-          text,
-        ].join('\n'),
-      });
-
-      await fs.writeFile(cacheFile, JSON.stringify(object, null, 2), 'utf-8');
-      console.log(`[DocumentService] Interview structure saved to ${cacheFile}`);
-      return {
-        structure: object,
-        generationTokens: { input: usage.inputTokens ?? 0, output: usage.outputTokens ?? 0 },
-      };
-    } catch (err) {
-      console.error(
-        '[DocumentService] Interview structure generation failed:',
-        err instanceof Error ? err.message : String(err),
-      );
-      return { structure: null, generationTokens: null };
     }
   }
 }
