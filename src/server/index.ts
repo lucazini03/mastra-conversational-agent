@@ -25,6 +25,10 @@ const httpServer = createServer(app);
 const publicDir = join(__dirname, '../../public');
 app.use(express.static(publicDir));
 
+app.get('/', (_req, res) => {
+  res.redirect('/demo1.html');
+});
+
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
